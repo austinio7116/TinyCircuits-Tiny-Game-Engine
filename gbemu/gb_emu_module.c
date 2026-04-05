@@ -92,6 +92,13 @@ static mp_obj_t gb_emu_mp_get_save_size(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_get_save_size_obj, gb_emu_mp_get_save_size);
 
+/* gb_emu.set_audio_enabled(bool) -> None */
+static mp_obj_t gb_emu_mp_set_audio_enabled(mp_obj_t enabled_obj) {
+    gb_emu_set_audio_enabled(mp_obj_is_true(enabled_obj) ? 1 : 0);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_set_audio_enabled_obj, gb_emu_mp_set_audio_enabled);
+
 /* Module globals table */
 static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR___name__),       MP_OBJ_NEW_QSTR(MP_QSTR_gb_emu) },
@@ -104,6 +111,7 @@ static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_cart_ram),    MP_ROM_PTR(&gb_emu_mp_get_cart_ram_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_cart_ram),    MP_ROM_PTR(&gb_emu_mp_set_cart_ram_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_save_size),   MP_ROM_PTR(&gb_emu_mp_get_save_size_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_set_audio_enabled), MP_ROM_PTR(&gb_emu_mp_set_audio_enabled_obj) },
     /* Joypad constants for Python convenience */
     { MP_OBJ_NEW_QSTR(MP_QSTR_BTN_A),           MP_OBJ_NEW_SMALL_INT(JOYPAD_A) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_BTN_B),           MP_OBJ_NEW_SMALL_INT(JOYPAD_B) },

@@ -248,6 +248,18 @@ float engine_audio_get_master_volume(){
             }
         }
 
+        /* Mix in GB emulator audio if available */
+        {
+            extern float gb_emu_get_audio_sample(void) __attribute__((weak));
+            if(gb_emu_get_audio_sample){
+                float gb_sample = gb_emu_get_audio_sample();
+                if(gb_sample != 0.0f){
+                    total_sample += gb_sample * master_volume;
+                    play_sample = true;
+                }
+            }
+        }
+
         if(play_sample){
             // Up to the user to make sure all playing channels do not add up and
             // go out of -1.0 ~ 1.0 range. Clamp the total sample sum since

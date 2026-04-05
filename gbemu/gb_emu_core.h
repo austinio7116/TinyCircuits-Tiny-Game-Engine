@@ -5,10 +5,24 @@
 #include <stddef.h>
 
 /* Peanut-GB configuration — must be defined before including peanut_gb.h */
-#define ENABLE_SOUND 0
+#define ENABLE_SOUND 1
 #define ENABLE_LCD 1
 #define PEANUT_GB_12_COLOUR 0
 #define PEANUT_GB_HIGH_LCD_ACCURACY 0
+
+/* minigb_apu configuration */
+#ifndef AUDIO_SAMPLE_RATE
+#define AUDIO_SAMPLE_RATE 22050
+#endif
+#ifndef MINIGB_APU_AUDIO_FORMAT_S16SYS
+#define MINIGB_APU_AUDIO_FORMAT_S16SYS
+#endif
+
+/* Forward declarations for Peanut-GB audio callbacks (called implicitly by peanut_gb.h) */
+#if ENABLE_SOUND
+void audio_write(uint16_t addr, uint8_t val);
+uint8_t audio_read(uint16_t addr);
+#endif
 
 /* Only gb_emu_core.c gets the Peanut-GB implementation.
  * All other files see only the declarations. */
@@ -50,5 +64,11 @@ void gb_emu_set_cart_ram(const uint8_t *data, size_t size);
 
 /* Get the save size (0 if no cart RAM). */
 size_t gb_emu_get_save_size(void);
+
+/* Audio: get next sample for engine mixing. Returns float -1.0 to 1.0, or 0 if no data. */
+float gb_emu_get_audio_sample(void);
+
+/* Audio: enable/disable audio output */
+void gb_emu_set_audio_enabled(int enabled);
 
 #endif /* GB_EMU_CORE_H */

@@ -1,5 +1,6 @@
 #define GB_EMU_CORE_IMPL
 #include "gb_emu_core.h"
+#include "minigb_apu.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -35,6 +36,19 @@ static const uint16_t palettes[GB_PALETTE_COUNT][4] = {
     { 0xE79C, 0xB596, 0x6B4D, 0x2104 },
 };
 
+/* --- Audio state --- */
+static struct minigb_apu_ctx apu_ctx;
+/* AUDIO_SAMPLES = (22050 / 59.7275) = 369, stereo = 738 */
+#define GB_APU_FRAME_SAMPLES 740
+static int16_t apu_frame_buf[GB_APU_FRAME_SAMPLES];
+
+/* Ring buffer for mono audio samples consumed by engine */
+#define GB_AUDIO_RING_SIZE 4096
+static int16_t audio_ring[GB_AUDIO_RING_SIZE];
+static volatile uint16_t audio_ring_write = 0;
+static volatile uint16_t audio_ring_read = 0;
+static int audio_enabled = 1;
+
 /* --- Peanut-GB callbacks --- */
 
 static uint8_t gb_rom_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
@@ -55,14 +69,10 @@ static void gb_cart_ram_write_cb(struct gb_s *gb, const uint_fast32_t addr, cons
 }
 
 static void gb_error_cb(struct gb_s *gb, const enum gb_error_e err, const uint16_t addr) {
-    /* Silently ignore errors to keep running */
-    (void)gb;
-    (void)err;
-    (void)addr;
+    (void)gb; (void)err; (void)addr;
 }
 
 static void lcd_draw_line_cb(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t line) {
-    /* Skip lines outside the center crop window */
     if (line < CROP_Y || line >= CROP_Y + THUMBY_H)
         return;
 
@@ -72,6 +82,15 @@ static void lcd_draw_line_cb(struct gb_s *gb, const uint8_t *pixels, const uint_
     }
 }
 
+/* Peanut-GB audio callbacks — called when GB code reads/writes APU registers */
+void audio_write(uint16_t addr, uint8_t val) {
+    minigb_apu_audio_write(&apu_ctx, addr, val);
+}
+
+uint8_t audio_read(uint16_t addr) {
+    return minigb_apu_audio_read(&apu_ctx, addr);
+}
+
 /* --- Public API --- */
 
 int gb_emu_init(uint8_t *rom_data, size_t rom_size) {
@@ -79,7 +98,6 @@ int gb_emu_init(uint8_t *rom_data, size_t rom_size) {
     rom_len = rom_size;
     memset(cart_ram, 0, sizeof(cart_ram));
 
-    /* Set default palette (classic green) */
     gb_emu_set_palette(GB_PALETTE_GREEN);
 
     enum gb_init_error_e ret = gb_init(&gb, gb_rom_read_cb, gb_cart_ram_read_cb,
@@ -88,23 +106,75 @@ int gb_emu_init(uint8_t *rom_data, size_t rom_size) {
         return -(int)ret;
 
     gb_init_lcd(&gb, lcd_draw_line_cb);
+
+    /* Initialize audio */
+    minigb_apu_audio_init(&apu_ctx);
+    audio_ring_write = 0;
+    audio_ring_read = 0;
+    audio_enabled = 1;
+
     initialized = 1;
     return 0;
 }
 
 void gb_emu_run_frame(void) {
-    if (initialized)
-        gb_run_frame(&gb);
+    if (!initialized) return;
+
+    gb_run_frame(&gb);
+
+    /* Generate audio samples for this frame */
+    if (audio_enabled) {
+        minigb_apu_audio_callback(&apu_ctx, apu_frame_buf);
+
+        /* Mix stereo to mono and push into ring buffer.
+         * AUDIO_SAMPLES = 22050/59.7275 ≈ 369 samples per frame. */
+        unsigned num_samples = (unsigned)(AUDIO_SAMPLE_RATE / VERTICAL_SYNC);
+        for (unsigned i = 0; i < num_samples; i++) {
+            int32_t left = apu_frame_buf[i * 2];
+            int32_t right = apu_frame_buf[i * 2 + 1];
+            int16_t mono = (int16_t)((left + right) / 2);
+
+            uint16_t next_w = (audio_ring_write + 1) & (GB_AUDIO_RING_SIZE - 1);
+            if (next_w != audio_ring_read) {
+                audio_ring[audio_ring_write] = mono;
+                audio_ring_write = next_w;
+            }
+            /* else: buffer full, drop sample */
+        }
+    }
+}
+
+/* Called by engine's audio callback at 22050Hz */
+float gb_emu_get_audio_sample(void) {
+    if (!audio_enabled || audio_ring_read == audio_ring_write)
+        return 0.0f;
+
+    int16_t sample = audio_ring[audio_ring_read];
+    audio_ring_read = (audio_ring_read + 1) & (GB_AUDIO_RING_SIZE - 1);
+
+    return (float)sample / 32767.0f;
+}
+
+void gb_emu_set_audio_enabled(int enabled) {
+    audio_enabled = enabled;
+    if (!enabled) {
+        audio_ring_write = 0;
+        audio_ring_read = 0;
+    }
 }
 
 void gb_emu_set_buttons(uint8_t buttons) {
     if (initialized)
-        gb.direct.joypad = ~buttons;  /* Peanut-GB uses active-low: 0=pressed, 1=released */
+        gb.direct.joypad = ~buttons;
 }
 
 void gb_emu_reset(void) {
-    if (initialized)
+    if (initialized) {
         gb_reset(&gb);
+        minigb_apu_audio_init(&apu_ctx);
+        audio_ring_write = 0;
+        audio_ring_read = 0;
+    }
 }
 
 const char *gb_emu_get_rom_name(char *buf) {
