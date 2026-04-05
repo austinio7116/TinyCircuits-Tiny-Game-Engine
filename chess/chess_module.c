@@ -15,7 +15,7 @@
 #include "chess_game.h"
 
 /* Buffers — allocated from MicroPython GC heap on demand */
-#define CHAL_TT_COUNT 2048
+#define CHAL_TT_COUNT 1024  /* 24KB — smaller to leave room for sounds + save */
 #define MCUMAX_TT_COUNT 4096
 
 /* Chal buffers */
@@ -178,7 +178,7 @@ static mp_obj_t chess_mp_is_game_over(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_is_game_over_obj, chess_mp_is_game_over);
 
-/* chess_engine.run_loop(sprite_texture, board_texture) -> int */
+/* chess_engine.run_loop(sprite_tex, board_tex, snd_move, snd_take, snd_pawn) -> int */
 static mp_obj_t chess_mp_run_loop(size_t n_args, const mp_obj_t *args) {
     mp_obj_t sprite_tex = args[0];
     mp_obj_t sprite_data_attr = mp_load_attr(sprite_tex, MP_QSTR_data);
@@ -194,15 +194,19 @@ static mp_obj_t chess_mp_run_loop(size_t n_args, const mp_obj_t *args) {
     int board_w = mp_obj_get_int(mp_load_attr(board_tex, MP_QSTR_width));
     int board_h = mp_obj_get_int(mp_load_attr(board_tex, MP_QSTR_height));
 
-    /* Engine allocation happens lazily in chess_game.c via chess_alloc_engine() */
+    /* Sound resources (optional) */
+    mp_obj_t snd_move = (n_args >= 3) ? args[2] : mp_const_none;
+    mp_obj_t snd_take = (n_args >= 4) ? args[3] : mp_const_none;
+    mp_obj_t snd_pawn = (n_args >= 5) ? args[4] : mp_const_none;
 
     chess_game_init((uint16_t *)sprite_buf.buf, sprite_w, sprite_h,
-                    (uint16_t *)board_buf.buf, board_w, board_h);
+                    (uint16_t *)board_buf.buf, board_w, board_h,
+                    snd_move, snd_take, snd_pawn);
     int frames = chess_game_run_loop();
     chess_free();
     return mp_obj_new_int(frames);
 }
-MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(chess_mp_run_loop_obj, 2, 2, chess_mp_run_loop);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(chess_mp_run_loop_obj, 2, 5, chess_mp_run_loop);
 
 /* Module globals table */
 static const mp_rom_map_elem_t chess_globals_table[] = {

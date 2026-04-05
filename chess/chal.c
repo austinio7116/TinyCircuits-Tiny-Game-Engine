@@ -1211,6 +1211,50 @@ int chal_get_side(void) {
     return side;
 }
 
+int chal_get_fen(char *buf, int buf_size) {
+    static const char piece_chars[] = ".pnbrqk..PNBRQK";
+    /* piece encoding: (color<<3)|type. color 0=white(upper), 1=black(lower) */
+    /* type: 1=P,2=N,3=B,4=R,5=Q,6=K */
+    int pos = 0;
+    for (int rank = 7; rank >= 0 && pos < buf_size - 10; rank--) {
+        int empty = 0;
+        for (int file = 0; file < 8; file++) {
+            int sq = rank * 16 + file;
+            int p = board[sq];
+            if (p == EMPTY) { empty++; continue; }
+            if (empty) { buf[pos++] = '0' + empty; empty = 0; }
+            int pt = piece_type(p);
+            int c = piece_color(p);
+            char ch = ".pnbrqk"[pt];
+            if (c == WHITE) ch -= 32; /* uppercase */
+            buf[pos++] = ch;
+        }
+        if (empty) { buf[pos++] = '0' + empty; }
+        if (rank > 0) buf[pos++] = '/';
+    }
+    buf[pos++] = ' ';
+    buf[pos++] = (side == WHITE) ? 'w' : 'b';
+    buf[pos++] = ' ';
+    /* Castling */
+    int has_castle = 0;
+    if (castle_rights & 1) { buf[pos++] = 'K'; has_castle = 1; }
+    if (castle_rights & 2) { buf[pos++] = 'Q'; has_castle = 1; }
+    if (castle_rights & 4) { buf[pos++] = 'k'; has_castle = 1; }
+    if (castle_rights & 8) { buf[pos++] = 'q'; has_castle = 1; }
+    if (!has_castle) buf[pos++] = '-';
+    buf[pos++] = ' ';
+    /* En passant */
+    if (ep_square != SQ_NONE) {
+        buf[pos++] = 'a' + (ep_square & 7);
+        buf[pos++] = '1' + (ep_square >> 4);
+    } else {
+        buf[pos++] = '-';
+    }
+    buf[pos] = '\0';
+    (void)piece_chars;
+    return pos;
+}
+
 int chal_get_legal_moves(chal_move_info_t *buffer, int buffer_size) {
     Move moves[256];
     int cnt = generate_moves(moves, 0);
@@ -1268,6 +1312,16 @@ chal_move_info_t chal_search_best_move(int max_depth, int time_ms) {
 
 void chal_stop_search(void) {
     chal_stop_flag = 1;
+}
+
+int chal_undo_move_api(void) {
+    if (ply <= 0) return 0;
+    undo_move();
+    return 1;
+}
+
+int chal_evaluate_position(void) {
+    return evaluate();
 }
 
 int chal_is_in_check(void) {

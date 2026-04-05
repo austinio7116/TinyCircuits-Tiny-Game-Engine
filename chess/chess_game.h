@@ -5,15 +5,16 @@
 #define CHESS_GAME_H
 
 #include <stdint.h>
+#include "py/obj.h"
 
 /* Initialize game state. Call before run_loop.
- * sprite_data: raw RGB565 pixel data from chess.bmp (96x32 = 6144 bytes)
- * board_data:  raw RGB565 pixel data from board.bmp (32x16 = 1024 bytes)
- * Both are 16-bit RGB565, bottom-up BMP layout. */
+ * sprite_data/board_data: raw RGB565 pixel data from BMP textures.
+ * sound_move/take/pawn: MicroPython WaveSoundResource objects (or mp_const_none). */
 void chess_game_init(uint16_t *sprite_data, int sprite_w, int sprite_h,
-                     uint16_t *board_data, int board_w, int board_h);
+                     uint16_t *board_data, int board_w, int board_h,
+                     mp_obj_t sound_move, mp_obj_t sound_take, mp_obj_t sound_pawn);
 
-/* Run the all-C game loop. Returns when MENU is pressed. */
+/* Run the all-C game loop. Returns when MENU exits to launcher. */
 int chess_game_run_loop(void);
 
 /* Called from chess_game.c when user selects an engine.

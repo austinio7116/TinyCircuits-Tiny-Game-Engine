@@ -74,6 +74,16 @@ These instructions assume that you are cloning MicroPython from the TinyCircuits
 
 Use `(cd ../../ports/unix && make clean)` to make clean if needed
 
+**IMPORTANT**: You MUST use `micropython_loop` to run the emulator, not `micropython` directly. The `micropython_loop` script restarts the process when a game exits back to the launcher (exit code 93). Without it, selecting a game from the launcher menu kills the process. The correct launch sequence is always:
+
+```bash
+pkill -9 -f micropython 2>/dev/null   # kill any stale instances first
+cd TinyCircuits-Tiny-Game-Engine/filesystem
+../micropython_loop ../../ports/unix/build-standard/micropython -X heapsize=2617152 main.py
+```
+
+**Do NOT launch games directly** (e.g. `cd Games/MyGame && micropython main.py`). This skips the launcher's engine initialization and audio will not work. Always launch via `main.py` in the `filesystem/` root directory, which shows the game launcher menu.
+
 ## Audio in the Linux emulator
 The Linux emulator supports audio playback through SDL2. All 4 engine audio channels work, including WaveSoundResource, ToneSoundResource, and RTTTLSoundResource.
 
@@ -85,16 +95,27 @@ EngineAudio: SDL audio device opened (freq=22050, channels=1, samples=512)
 ```
 
 ### WSL2 audio troubleshooting
+- **Kill stale instances**: Always run `pkill -9 -f micropython` before launching. Multiple instances fight over the SDL/PulseAudio device and cause silent audio even though the device "opens" successfully
 - **WSLg required**: Audio relies on WSLg's PulseAudio server. Verify it's available: `ls /mnt/wslg/PulseServer`
 - **PULSE_SERVER**: Should be set automatically by WSLg. Verify: `echo $PULSE_SERVER` (expect `unix:/mnt/wslg/PulseServer`)
 - **PulseAudio client library**: Install if missing: `sudo apt install libpulse0`
 - **Windows 10**: WSLg is not available. You would need to run a PulseAudio server on Windows and forward it into WSL2 manually
 - **No sound but device opens**: Check Windows volume mixer — the WSLg PulseAudio sink may be muted
 
-# Building and Running On Linux Quickly 
-If you followed the one of two methods to setup everythign above, you can run the following from `micropython/TinyCircuits-Tiny-Game-Engine/filesystem` to build and run a MicroPython script on Linux quickly:
+### Submodule audio files
+If you have a fork with custom audio changes (e.g. SDL audio callback implementation), note that the build compiles from the **submodule** copy of the engine at `mp-thumby/TinyCircuits-Tiny-Game-Engine/`, not your fork. After `make clean` or `git submodule update`, you must re-copy your modified audio files:
+```bash
+cp <your-fork>/src/audio/engine_audio_module.c mp-thumby/TinyCircuits-Tiny-Game-Engine/src/audio/
+cp <your-fork>/src/display/engine_display_driver_unix_sdl.c mp-thumby/TinyCircuits-Tiny-Game-Engine/src/display/
+```
 
-`(cd ../../ports/unix && make -j8 DEBUG=1 USER_C_MODULES=../../TinyCircuits-Tiny-Game-Engine) && (../../ports/unix/build-standard/micropython main.py)`
+# Building and Running On Linux Quickly 
+If you followed the one of two methods to setup everything above, you can build and run from `micropython/TinyCircuits-Tiny-Game-Engine/filesystem`:
+
+```bash
+(cd ../../ports/unix && make -j8 DEBUG=1 USER_C_MODULES=../../TinyCircuits-Tiny-Game-Engine)
+../micropython_loop ../../ports/unix/build-standard/micropython -X heapsize=2617152 main.py
+```
 
 # Diagnosing HARD_FAULT
 If a hard fault blue screen occurs on the device, it will also usually occur in the Linux build too. It likely still won't be easy to solve, but you can see exactly where in MicroPython or the engine C code where the fault occurs using `gdb`. Using Linux is easier, but `gdb` can be used with the device as well but it is harder to setup.

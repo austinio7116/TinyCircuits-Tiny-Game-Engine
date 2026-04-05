@@ -116,9 +116,22 @@ static struct {
     int result;  /* 0=ongoing, 1=checkmate, 2=stalemate */
     int winner_is_white;
 
-    /* AI thinking animation */
-    int think_dots;
+    /* AI thinking */
     int think_frame;
+
+    /* Evaluation score (centipawns, from white's perspective) */
+    int eval_score;
+
+    /* Settings */
+    int sound_on;
+    int show_eval_bar;
+
+    /* Pause menu */
+    int paused;
+    int pause_cursor;  /* 0=resume, 1=sound, 2=eval, 3=quit */
+
+    /* Move count for undo tracking */
+    int move_count;  /* total half-moves played */
 
     /* Sprite data */
     uint16_t *sprite_data;
@@ -126,7 +139,10 @@ static struct {
     uint16_t *board_data;
     int board_w, board_h;
 
-    /* (board snapshot removed — blocking search, no concurrent rendering) */
+    /* Sound resources (MicroPython objects) */
+    mp_obj_t snd_move;
+    mp_obj_t snd_take;
+    mp_obj_t snd_pawn;
 } game;
 
 static const char *diff_names[] = { "Easy", "Medium", "Hard", "Expert" };
@@ -160,7 +176,26 @@ static void engine_new_game(void) {
     else mcumax_init();
 }
 
-/* engine_stop_search and engine_setup_search removed — single-threaded blocking search */
+/* Forward declarations */
+static void update_eval(void);
+static void draw_eval_bar(void);
+
+/* ---- Sound playback via engine_audio C API ---- */
+#include "audio/engine_audio_module.h"
+#include "audio/engine_audio_channel.h"
+extern volatile mp_obj_t channels[];
+
+static void play_sound(mp_obj_t snd) {
+    if (!game.sound_on || snd == mp_const_none) return;
+    audio_channel_class_obj_t *ch = (audio_channel_class_obj_t *)channels[0];
+    if (ch != NULL) {
+        engine_audio_play_on_channel(snd, ch, mp_const_false);
+    }
+}
+
+static void init_audio(void) {
+    /* channels are initialized by engine_audio_setup, nothing extra needed */
+}
 
 /* ---- Tiny 4x6 font for status text ---- */
 /* ASCII 32-90 (space through Z), 4 pixels wide, 6 pixels tall */
@@ -466,7 +501,6 @@ static void draw_board(void) {
 static void enter_state(game_state_t new_state) {
     game.state = new_state;
     game.think_frame = 0;
-    game.think_dots = 0;
 }
 
 static int is_player_turn(void) {
@@ -543,6 +577,10 @@ static void do_player_select(void) {
                 }
             }
 
+            /* Check piece types BEFORE the move for sound selection */
+            int moving_type = engine_get_piece(game.sel_rank, game.sel_file) & 0x7;
+            int is_capture = (engine_get_piece(game.cursor_rank, game.cursor_file) & 0x7) != CHAL_EMPTY;
+
             bool ok;
             if (game.engine == ENGINE_CHAL) {
                 uint8_t from = game_to_0x88(game.sel_rank, game.sel_file);
@@ -552,14 +590,20 @@ static void do_player_select(void) {
                 ok = mcumax_play_move((mcumax_move){from, to});
             }
             if (ok) {
+                /* Play sound */
+                if (is_capture) play_sound(game.snd_take);
+                else if (moving_type == CHAL_PAWN) play_sound(game.snd_pawn);
+                else play_sound(game.snd_move);
+
                 game.has_last_move = 1;
                 game.last_from_file = game.sel_file;
                 game.last_from_rank = game.sel_rank;
                 game.last_to_file = game.cursor_file;
                 game.last_to_rank = game.cursor_rank;
                 game.selected = 0;
+                game.move_count++;
+                update_eval();
 
-                /* Check for game end */
                 check_game_end();
                 if (game.state != STATE_GAME_OVER) {
                     enter_state(STATE_AI_THINKING);
@@ -627,6 +671,179 @@ static void darken_screen(void) {
     }
 }
 
+/* ---- Eval bar (4px wide on left edge) ---- */
+static void draw_eval_bar(void) {
+    if (!game.show_eval_bar) return;
+
+    /* Score from white's perspective. Chal: side-to-move, mcu-max: no eval. */
+    int score = game.eval_score;
+    /* Clamp to [-500, 500] centipawns for display */
+    if (score > 500) score = 500;
+    if (score < -500) score = -500;
+
+    /* Map score to bar position: 0 = bottom (black winning), 128 = top (white winning) */
+    int mid = SCREEN_H / 2;
+    int bar_h = (score * mid) / 500;  /* positive = white, up */
+
+    /* Draw background (dark) */
+    fill_rect(0, 0, 4, SCREEN_H, 0x2104);
+
+    /* Draw white portion (from bottom up to mid+bar_h) */
+    int white_top = mid - bar_h;
+    if (white_top < 0) white_top = 0;
+    if (white_top > SCREEN_H) white_top = SCREEN_H;
+    fill_rect(0, white_top, 4, SCREEN_H - white_top, 0xFFFF);
+
+    /* Draw center line */
+    for (int x = 0; x < 4; x++)
+        active_screen_buffer[mid * SCREEN_W + x] = 0x8410;
+}
+
+static void update_eval(void) {
+    if (game.engine == ENGINE_CHAL) {
+        /* Get eval from side-to-move perspective, convert to white's perspective */
+        int eval = chal_evaluate_position();
+        game.eval_score = (chal_get_side() == CHAL_WHITE) ? eval : -eval;
+    } else {
+        game.eval_score = 0;  /* mcu-max doesn't expose eval */
+    }
+}
+
+/* ---- Save/Load game via engine_save ---- */
+static mp_obj_t save_fn = MP_OBJ_NULL;
+static mp_obj_t load_fn = MP_OBJ_NULL;
+static mp_obj_t set_location_fn = MP_OBJ_NULL;
+
+static void init_save_module(void) {
+    if (save_fn != MP_OBJ_NULL) return;
+    mp_obj_t mod = mp_import_name(MP_QSTR_engine_save, mp_const_none, MP_OBJ_NEW_SMALL_INT(0));
+    save_fn = mp_load_attr(mod, MP_QSTR_save);
+    load_fn = mp_load_attr(mod, MP_QSTR_load);
+    set_location_fn = mp_load_attr(mod, MP_QSTR_set_location);
+    /* Set save file location */
+    mp_obj_t path = mp_obj_new_str("deepthumb.sav", 13);
+    mp_call_function_1(set_location_fn, path);
+}
+
+static void save_game(void) {
+    if (game.engine != ENGINE_CHAL) return;  /* only Chal supports FEN save */
+    init_save_module();
+
+    char fen[128];
+    chal_get_fen(fen, sizeof(fen));
+
+    mp_call_function_2(save_fn, mp_obj_new_str("fen", 3), mp_obj_new_str(fen, strlen(fen)));
+    mp_call_function_2(save_fn, mp_obj_new_str("engine", 6), mp_obj_new_int(game.engine));
+    mp_call_function_2(save_fn, mp_obj_new_str("diff", 4), mp_obj_new_int(game.difficulty));
+    mp_call_function_2(save_fn, mp_obj_new_str("white", 5), mp_obj_new_int(game.player_is_white));
+    mp_call_function_2(save_fn, mp_obj_new_str("moves", 5), mp_obj_new_int(game.move_count));
+}
+
+static int load_game(void) {
+    init_save_module();
+
+    /* Try to load FEN — if it doesn't exist, return 0 */
+    mp_obj_t fen_obj = mp_call_function_2(load_fn, mp_obj_new_str("fen", 3), mp_const_none);
+    if (fen_obj == mp_const_none) return 0;
+
+    const char *fen = mp_obj_str_get_str(fen_obj);
+    int eng = mp_obj_get_int(mp_call_function_2(load_fn, mp_obj_new_str("engine", 6), MP_OBJ_NEW_SMALL_INT(0)));
+    int diff = mp_obj_get_int(mp_call_function_2(load_fn, mp_obj_new_str("diff", 4), MP_OBJ_NEW_SMALL_INT(1)));
+    int white = mp_obj_get_int(mp_call_function_2(load_fn, mp_obj_new_str("white", 5), MP_OBJ_NEW_SMALL_INT(1)));
+    int moves = mp_obj_get_int(mp_call_function_2(load_fn, mp_obj_new_str("moves", 5), MP_OBJ_NEW_SMALL_INT(0)));
+
+    game.engine = eng;
+    game.difficulty = diff;
+    game.player_is_white = white;
+    game.move_count = moves;
+
+    chess_alloc_engine(game.engine);
+    if (game.engine == ENGINE_CHAL) {
+        chal_set_fen(fen);
+    }
+
+    game.cursor_file = 4;
+    game.cursor_rank = game.player_is_white ? 6 : 1;
+    game.selected = 0;
+    game.legal_move_count = 0;
+    game.has_last_move = 0;
+    game.result = 0;
+    update_eval();
+
+    return 1;
+}
+
+static void clear_save(void) {
+    init_save_module();
+    mp_call_function_2(save_fn, mp_obj_new_str("fen", 3), mp_const_none);
+}
+
+/* ---- Pause menu ---- */
+#define PAUSE_RESUME   0
+#define PAUSE_SOUND    1
+#define PAUSE_EVAL     2
+#define PAUSE_SAVE     3
+#define PAUSE_QUIT     4
+#define PAUSE_COUNT    5
+
+static void draw_pause_menu(void) {
+    fill_rect(14, 16, 100, 96, COLOR_BG);
+    draw_rect_outline(14, 16, 100, 96, COLOR_TEXT_WHITE);
+    draw_text(36, 20, "PAUSED", COLOR_TEXT_WHITE);
+
+    for (int x = 20; x < 108; x++)
+        active_screen_buffer[29 * SCREEN_W + x] = COLOR_TEXT_DIM;
+
+    const char *items[] = { "RESUME", "SOUND", "EVAL BAR", "SAVE+QUIT", "QUIT" };
+    const char *vals[]  = { "", game.sound_on ? "ON" : "OFF",
+                            game.show_eval_bar ? "ON" : "OFF", "", "" };
+
+    for (int i = 0; i < PAUSE_COUNT; i++) {
+        int y = 34 + i * 13;
+        uint16_t color = (i == game.pause_cursor) ? COLOR_TEXT_WHITE : COLOR_TEXT_DIM;
+        if (i == game.pause_cursor)
+            fill_rect(18, y - 1, 92, 11, 0x2945);
+        draw_text(24, y, items[i], color);
+        if (vals[i][0]) draw_text(76, y, vals[i], 0x07E0);
+    }
+}
+
+static int handle_pause_menu(void) {
+    /* Returns: 0=stay, 1=quit to title, 2=save+quit */
+    if (button_is_just_pressed(&BUTTON_DPAD_UP))
+        game.pause_cursor = (game.pause_cursor + PAUSE_COUNT - 1) % PAUSE_COUNT;
+    if (button_is_just_pressed(&BUTTON_DPAD_DOWN))
+        game.pause_cursor = (game.pause_cursor + 1) % PAUSE_COUNT;
+    if (button_is_just_pressed(&BUTTON_A)) {
+        switch (game.pause_cursor) {
+            case PAUSE_RESUME: game.paused = 0; break;
+            case PAUSE_SOUND:  game.sound_on = !game.sound_on; break;
+            case PAUSE_EVAL:   game.show_eval_bar = !game.show_eval_bar; break;
+            case PAUSE_SAVE:   save_game(); return 1;
+            case PAUSE_QUIT:   clear_save(); return 1;
+        }
+    }
+    if (button_is_just_pressed(&BUTTON_MENU) || button_is_just_pressed(&BUTTON_B))
+        game.paused = 0;
+    return 0;
+}
+
+/* ---- Undo (Chal only: undo AI move + player move) ---- */
+static void do_undo(void) {
+    if (game.engine != ENGINE_CHAL) return;  /* mcu-max has no undo */
+    if (game.move_count < 2) return;  /* need at least one full move pair */
+
+    /* Undo AI's last move */
+    if (chal_undo_move_api()) game.move_count--;
+    /* Undo player's last move */
+    if (chal_undo_move_api()) game.move_count--;
+
+    game.selected = 0;
+    game.legal_move_count = 0;
+    game.has_last_move = 0;
+    update_eval();
+}
+
 static void tick_title(void) {
     /* Ensure board is at starting position for the backdrop */
     if (game.think_frame == 0) {
@@ -646,16 +863,22 @@ static void tick_title(void) {
     draw_text(41, 47, "CHESS", 0x0000);
     draw_text(42, 46, "CHESS", COLOR_TEXT_DIM);
 
-    /* Start prompt */
-    fill_rect(20, 78, 88, 20, COLOR_BG);
-    draw_rect_outline(20, 78, 88, 20, COLOR_TEXT_DIM);
-    draw_text(30, 82, "PRESS A", COLOR_TEXT_WHITE);
-    draw_text(30, 90, "TO PLAY", COLOR_TEXT_WHITE);
+    /* Start / Continue prompts */
+    fill_rect(16, 72, 96, 34, COLOR_BG);
+    draw_rect_outline(16, 72, 96, 34, COLOR_TEXT_DIM);
+    draw_text(30, 76, "A: NEW GAME", COLOR_TEXT_WHITE);
+    draw_text(30, 88, "B: CONTINUE", COLOR_TEXT_DIM);
 
     if (button_is_just_pressed(&BUTTON_A)) {
-        game.difficulty = 1;  /* default medium */
+        game.difficulty = 1;
         game.player_is_white = 1;
         enter_state(STATE_SETUP);
+    }
+    if (button_is_just_pressed(&BUTTON_B)) {
+        /* Try to load saved game */
+        if (load_game()) {
+            enter_state(STATE_PLAYER_TURN);
+        }
     }
 }
 
@@ -720,11 +943,18 @@ static void tick_setup(void) {
     }
     if (button_is_just_pressed(&BUTTON_B)) {
         game.engine = (game.engine + 1) % 2;
+        /* Re-init the new engine so the backdrop board renders correctly */
+        chess_alloc_engine(game.engine);
+        engine_new_game();
     }
 
     if (button_is_just_pressed(&BUTTON_A)) {
         chess_alloc_engine(game.engine);
         engine_new_game();
+
+        /* Sound init — done from Python via run_loop args */
+        init_audio();
+
         game.cursor_file = 4;
         game.cursor_rank = game.player_is_white ? 6 : 1;
         game.selected = 0;
@@ -741,37 +971,58 @@ static void tick_setup(void) {
 }
 
 static void tick_player_turn(void) {
+    /* Handle pause menu */
+    if (game.paused) {
+        draw_board();
+        draw_eval_bar();
+        darken_screen();
+        draw_pause_menu();
+        if (handle_pause_menu()) enter_state(STATE_TITLE);
+        return;
+    }
+
     draw_board();
+    draw_eval_bar();
+
+    /* MENU = pause */
+    if (button_is_just_pressed(&BUTTON_MENU)) {
+        game.paused = 1;
+        game.pause_cursor = 0;
+        return;
+    }
 
     /* D-pad cursor movement — flip directions when board is flipped (playing black) */
-    int rank_dec = game.player_is_white ? 7 : 1;  /* visual "up" */
-    int rank_inc = game.player_is_white ? 1 : 7;  /* visual "down" */
-    int file_dec = game.player_is_white ? 7 : 1;  /* visual "left" */
-    int file_inc = game.player_is_white ? 1 : 7;  /* visual "right" */
+    int rank_dec = game.player_is_white ? 7 : 1;
+    int rank_inc = game.player_is_white ? 1 : 7;
+    int file_dec = game.player_is_white ? 7 : 1;
+    int file_inc = game.player_is_white ? 1 : 7;
 
-    if (button_is_just_pressed(&BUTTON_DPAD_UP) || button_is_pressed_autorepeat(&BUTTON_DPAD_UP)) {
+    if (button_is_just_pressed(&BUTTON_DPAD_UP) || button_is_pressed_autorepeat(&BUTTON_DPAD_UP))
         game.cursor_rank = (game.cursor_rank + rank_dec) % 8;
-    }
-    if (button_is_just_pressed(&BUTTON_DPAD_DOWN) || button_is_pressed_autorepeat(&BUTTON_DPAD_DOWN)) {
+    if (button_is_just_pressed(&BUTTON_DPAD_DOWN) || button_is_pressed_autorepeat(&BUTTON_DPAD_DOWN))
         game.cursor_rank = (game.cursor_rank + rank_inc) % 8;
-    }
-    if (button_is_just_pressed(&BUTTON_DPAD_LEFT) || button_is_pressed_autorepeat(&BUTTON_DPAD_LEFT)) {
+    if (button_is_just_pressed(&BUTTON_DPAD_LEFT) || button_is_pressed_autorepeat(&BUTTON_DPAD_LEFT))
         game.cursor_file = (game.cursor_file + file_dec) % 8;
-    }
-    if (button_is_just_pressed(&BUTTON_DPAD_RIGHT) || button_is_pressed_autorepeat(&BUTTON_DPAD_RIGHT)) {
+    if (button_is_just_pressed(&BUTTON_DPAD_RIGHT) || button_is_pressed_autorepeat(&BUTTON_DPAD_RIGHT))
         game.cursor_file = (game.cursor_file + file_inc) % 8;
-    }
 
     /* A = select/move */
-    if (button_is_just_pressed(&BUTTON_A)) {
+    if (button_is_just_pressed(&BUTTON_A))
         do_player_select();
+
+    /* B = undo if nothing selected, deselect if piece selected */
+    if (button_is_just_pressed(&BUTTON_B)) {
+        if (game.selected) {
+            game.selected = 0;
+            game.legal_move_count = 0;
+        } else {
+            do_undo();
+        }
     }
 
-    /* B = deselect */
-    if (button_is_just_pressed(&BUTTON_B)) {
-        game.selected = 0;
-        game.legal_move_count = 0;
-    }
+    /* LB = undo (always) */
+    if (button_is_just_pressed(&BUTTON_BUMPER_LEFT))
+        do_undo();
 }
 
 static void tick_ai_thinking(void) {
@@ -818,6 +1069,10 @@ static void tick_ai_thinking(void) {
             mcumax_play_move((mcumax_move){search_result_from, search_result_to});
         }
 
+        game.move_count++;
+        play_sound(game.snd_move);
+        update_eval();
+
         check_game_end();
         if (game.state != STATE_GAME_OVER) {
             enter_state(STATE_PLAYER_TURN);
@@ -858,7 +1113,8 @@ static void tick_game_over(void) {
 /* ---- Public API ---- */
 
 void chess_game_init(uint16_t *sprite_data, int sprite_w, int sprite_h,
-                     uint16_t *board_data, int board_w, int board_h) {
+                     uint16_t *board_data, int board_w, int board_h,
+                     mp_obj_t sound_move, mp_obj_t sound_take, mp_obj_t sound_pawn) {
     memset(&game, 0, sizeof(game));
     game.sprite_data = sprite_data;
     game.sprite_w = sprite_w;
@@ -866,10 +1122,15 @@ void chess_game_init(uint16_t *sprite_data, int sprite_w, int sprite_h,
     game.board_data = board_data;
     game.board_w = board_w;
     game.board_h = board_h;
+    game.snd_move = sound_move;
+    game.snd_take = sound_take;
+    game.snd_pawn = sound_pawn;
     game.cursor_file = 4;
     game.cursor_rank = 6;
     game.difficulty = 1;
     game.player_is_white = 1;
+    game.sound_on = 1;
+    game.show_eval_bar = 0;
     enter_state(STATE_TITLE);
 }
 
@@ -880,7 +1141,9 @@ int chess_game_run_loop(void) {
         if (!engine_tick())
             continue;
 
-        if (button_is_just_pressed(&BUTTON_MENU))
+        /* MENU exits to launcher from title/setup, handled in-game by pause menu */
+        if (button_is_just_pressed(&BUTTON_MENU) &&
+            (game.state == STATE_TITLE || game.state == STATE_SETUP))
             break;
 
         switch (game.state) {

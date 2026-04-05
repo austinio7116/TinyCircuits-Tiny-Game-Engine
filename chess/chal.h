@@ -59,8 +59,17 @@ int chal_play_move(int from_sq, int to_sq, int promo);
  * time_ms: time budget in milliseconds (0 = no time limit, use depth only) */
 chal_move_info_t chal_search_best_move(int max_depth, int time_ms);
 
+/* Export current position as FEN string. Returns length written. */
+int chal_get_fen(char *buf, int buf_size);
+
 /* Abort a running search (call from another thread/core) */
 void chal_stop_search(void);
+
+/* Undo the last move. Returns 1 if successful, 0 if no moves to undo. */
+int chal_undo_move_api(void);
+
+/* Static evaluation of current position (centipawns, side-to-move perspective) */
+int chal_evaluate_position(void);
 
 /* Check if current side is in check */
 int chal_is_in_check(void);
