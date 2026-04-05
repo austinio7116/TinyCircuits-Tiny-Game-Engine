@@ -19,21 +19,30 @@ static int initialized = 0;
 #define GB_SCREEN_H  144
 #define THUMBY_W     128
 #define THUMBY_H     128
-#define CROP_X       ((GB_SCREEN_W - THUMBY_W) / 2)  /* 16 */
-#define CROP_Y       ((GB_SCREEN_H - THUMBY_H) / 2)  /* 8 */
+#define CROP_X_MAX   (GB_SCREEN_W - THUMBY_W)  /* 32 */
+#define CROP_Y_MAX   (GB_SCREEN_H - THUMBY_H)  /* 16 */
+
+/* Mutable crop offsets — adjustable at runtime */
+static int crop_x = CROP_X_MAX / 2;  /* default center: 16 */
+static int crop_y = CROP_Y_MAX / 2;  /* default center: 8 */
 
 /* RGB565 palette lookup — 4 shades */
 static uint16_t palette_rgb565[4];
 
-/* Preset palettes (RGB565 values, darkest to lightest indexed 0-3) */
-/* Note: GB shade 0 = lightest, shade 3 = darkest */
+/* Preset palettes (RGB565 values, shade 0=lightest to shade 3=darkest) */
 static const uint16_t palettes[GB_PALETTE_COUNT][4] = {
-    /* Classic GB green: lightest (#9BBC0F) to darkest (#0F380F) */
+    /* Classic GB green */
     { 0x9DE1, 0x8D60, 0x3300, 0x0A00 },
-    /* Grayscale: white to black */
+    /* Grayscale */
     { 0xFFFF, 0xAD55, 0x52AA, 0x0000 },
-    /* GB Pocket: light to dark */
+    /* GB Pocket */
     { 0xE79C, 0xB596, 0x6B4D, 0x2104 },
+    /* Cream (warm sepia) */
+    { 0xFFF5, 0xDECA, 0x9C60, 0x4200 },
+    /* Blue */
+    { 0xDF9F, 0x5D5F, 0x2A5E, 0x0010 },
+    /* Red */
+    { 0xFFFF, 0xFBCA, 0xC180, 0x6000 },
 };
 
 /* --- Audio state --- */
@@ -73,12 +82,12 @@ static void gb_error_cb(struct gb_s *gb, const enum gb_error_e err, const uint16
 }
 
 static void lcd_draw_line_cb(struct gb_s *gb, const uint8_t *pixels, const uint_fast8_t line) {
-    if (line < CROP_Y || line >= CROP_Y + THUMBY_H)
+    if (line < crop_y || line >= crop_y + THUMBY_H)
         return;
 
-    uint16_t *dst = active_screen_buffer + (line - CROP_Y) * THUMBY_W;
+    uint16_t *dst = active_screen_buffer + (line - crop_y) * THUMBY_W;
     for (int x = 0; x < THUMBY_W; x++) {
-        dst[x] = palette_rgb565[pixels[x + CROP_X] & 0x03];
+        dst[x] = palette_rgb565[pixels[x + crop_x] & 0x03];
     }
 }
 
@@ -163,6 +172,18 @@ void gb_emu_set_audio_enabled(int enabled) {
     }
 }
 
+void gb_emu_set_crop(int x, int y) {
+    if (x < 0) x = 0;
+    if (x > CROP_X_MAX) x = CROP_X_MAX;
+    if (y < 0) y = 0;
+    if (y > CROP_Y_MAX) y = CROP_Y_MAX;
+    crop_x = x;
+    crop_y = y;
+}
+
+int gb_emu_get_crop_x(void) { return crop_x; }
+int gb_emu_get_crop_y(void) { return crop_y; }
+
 void gb_emu_set_buttons(uint8_t buttons) {
     if (initialized)
         gb.direct.joypad = ~buttons;
@@ -201,6 +222,46 @@ void gb_emu_set_cart_ram(const uint8_t *data, size_t size) {
     if (size > sizeof(cart_ram))
         size = sizeof(cart_ram);
     memcpy(cart_ram, data, size);
+}
+
+/* --- Save states --- */
+
+size_t gb_emu_get_state_size(void) {
+    return sizeof(struct gb_s) + sizeof(struct minigb_apu_ctx);
+}
+
+int gb_emu_save_state(uint8_t *buf, size_t buf_size) {
+    if (!initialized) return -1;
+    size_t needed = gb_emu_get_state_size();
+    if (buf_size < needed) return -2;
+    memcpy(buf, &gb, sizeof(struct gb_s));
+    memcpy(buf + sizeof(struct gb_s), &apu_ctx, sizeof(struct minigb_apu_ctx));
+    return 0;
+}
+
+int gb_emu_load_state(const uint8_t *buf, size_t buf_size) {
+    if (!initialized) return -1;
+    size_t needed = gb_emu_get_state_size();
+    if (buf_size < needed) return -2;
+
+    /* Restore GB state */
+    memcpy(&gb, buf, sizeof(struct gb_s));
+
+    /* Re-set function pointers (not valid from serialized data) */
+    gb.gb_rom_read = gb_rom_read_cb;
+    gb.gb_cart_ram_read = gb_cart_ram_read_cb;
+    gb.gb_cart_ram_write = gb_cart_ram_write_cb;
+    gb.gb_error = gb_error_cb;
+    gb.display.lcd_draw_line = lcd_draw_line_cb;
+    gb.gb_serial_tx = NULL;
+    gb.gb_serial_rx = NULL;
+    gb.gb_bootrom_read = NULL;
+    gb.direct.priv = NULL;
+
+    /* Restore APU state */
+    memcpy(&apu_ctx, buf + sizeof(struct gb_s), sizeof(struct minigb_apu_ctx));
+
+    return 0;
 }
 
 size_t gb_emu_get_save_size(void) {

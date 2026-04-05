@@ -36,7 +36,10 @@ uint8_t audio_read(uint16_t addr);
 #define GB_PALETTE_GREEN  0
 #define GB_PALETTE_GRAY   1
 #define GB_PALETTE_POCKET 2
-#define GB_PALETTE_COUNT  3
+#define GB_PALETTE_CREAM  3
+#define GB_PALETTE_BLUE   4
+#define GB_PALETTE_RED    5
+#define GB_PALETTE_COUNT  6
 
 /* Initialize the emulator with ROM data. Returns 0 on success, negative on error. */
 int gb_emu_init(uint8_t *rom_data, size_t rom_size);
@@ -70,5 +73,15 @@ float gb_emu_get_audio_sample(void);
 
 /* Audio: enable/disable audio output */
 void gb_emu_set_audio_enabled(int enabled);
+
+/* Crop offset: pan the 128x128 viewport within 160x144 GB screen */
+void gb_emu_set_crop(int x, int y);
+int gb_emu_get_crop_x(void);
+int gb_emu_get_crop_y(void);
+
+/* Save states: snapshot/restore full emulator state */
+size_t gb_emu_get_state_size(void);
+int gb_emu_save_state(uint8_t *buf, size_t buf_size);
+int gb_emu_load_state(const uint8_t *buf, size_t buf_size);
 
 #endif /* GB_EMU_CORE_H */

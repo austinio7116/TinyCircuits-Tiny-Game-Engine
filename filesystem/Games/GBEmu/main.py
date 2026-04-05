@@ -13,7 +13,9 @@ from engine_draw import Color
 # --- Configuration ---
 ROM_DIR = "roms"
 SAVE_DIR = "saves"
-PALETTE_NAMES = ["Green", "Gray", "Pocket"]
+STATE_DIR = "saves"
+PALETTE_NAMES = ["Green", "Gray", "Pocket", "Cream", "Blue", "Red"]
+PAN_SPEED = 2  # pixels per frame when panning
 
 # --- Helpers ---
 def find_roms():
@@ -26,13 +28,16 @@ def find_roms():
     return roms
 
 def load_rom(filename):
+    gc.collect()
     path = ROM_DIR + "/" + filename
+    size = os.stat(path)[6]
+    buf = bytearray(size)
     with open(path, "rb") as f:
-        return bytearray(f.read())
+        f.readinto(buf)
+    return buf
 
-def save_path_for(rom_filename):
-    base = rom_filename.rsplit('.', 1)[0]
-    return SAVE_DIR + "/" + base + ".sav"
+def base_name(rom_filename):
+    return rom_filename.rsplit('.', 1)[0]
 
 def ensure_dir(path):
     try:
@@ -47,19 +52,39 @@ def save_cart_ram(rom_filename):
     ensure_dir(SAVE_DIR)
     data = gb_emu.get_cart_ram()
     if data:
-        with open(save_path_for(rom_filename), "wb") as f:
+        with open(SAVE_DIR + "/" + base_name(rom_filename) + ".sav", "wb") as f:
             f.write(data)
-        print("GBEmu: Saved cart RAM", size, "bytes")
 
 def load_cart_ram(rom_filename):
-    path = save_path_for(rom_filename)
     try:
-        with open(path, "rb") as f:
-            data = f.read()
-        gb_emu.set_cart_ram(data)
-        print("GBEmu: Loaded cart RAM", len(data), "bytes")
+        with open(SAVE_DIR + "/" + base_name(rom_filename) + ".sav", "rb") as f:
+            gb_emu.set_cart_ram(f.read())
     except OSError:
         pass
+
+def save_state(rom_filename):
+    ensure_dir(STATE_DIR)
+    data = gb_emu.save_state()
+    if data:
+        with open(STATE_DIR + "/" + base_name(rom_filename) + ".state", "wb") as f:
+            f.write(data)
+        return True
+    return False
+
+def load_state(rom_filename):
+    try:
+        with open(STATE_DIR + "/" + base_name(rom_filename) + ".state", "rb") as f:
+            data = f.read()
+        return gb_emu.load_state(data)
+    except OSError:
+        return False
+
+def has_save_state(rom_filename):
+    try:
+        os.stat(STATE_DIR + "/" + base_name(rom_filename) + ".state")
+        return True
+    except OSError:
+        return False
 
 # --- ROM Browser ---
 def rom_browser(roms):
@@ -89,7 +114,6 @@ def rom_browser(roms):
     max_visible = 7
     item_h = 12
 
-    # Truncate display names
     def display_name(f):
         name = f.rsplit('.', 1)[0]
         if len(name) > 18:
@@ -150,25 +174,34 @@ def rom_browser(roms):
 
 # --- Pause Menu ---
 def pause_menu(rom_filename, current_palette, audio_on):
-    options = ["Resume", "Palette: " + PALETTE_NAMES[current_palette],
-               "Audio: " + ("On" if audio_on else "Off"), "Reset", "Quit"]
+    has_state = has_save_state(rom_filename)
+    options = [
+        "Resume",
+        "Palette: " + PALETTE_NAMES[current_palette],
+        "Audio: " + ("On" if audio_on else "Off"),
+        "Save State",
+        "Load State" + ("" if has_state else " (none)"),
+        "Reset",
+        "Quit",
+    ]
     cursor = 0
 
     cam = CameraNode()
 
-    bg = Rectangle2DNode(width=105, height=90, color=Color(0, 0, 0), position=Vector2(0, 2))
+    menu_h = 110
+    bg = Rectangle2DNode(width=110, height=menu_h, color=Color(0, 0, 0), position=Vector2(0, 0))
     bg.opacity = 0.85
     cam.add_child(bg)
 
-    border = Rectangle2DNode(width=105, height=90, color=Color(1, 1, 1), outline=True, position=Vector2(0, 2))
+    border = Rectangle2DNode(width=110, height=menu_h, color=Color(1, 1, 1), outline=True, position=Vector2(0, 0))
     cam.add_child(border)
 
-    title = Text2DNode(text="PAUSED", position=Vector2(0, -32))
+    title = Text2DNode(text="PAUSED", position=Vector2(0, -42))
     cam.add_child(title)
 
     items = []
     for i in range(len(options)):
-        t = Text2DNode(text="", position=Vector2(0, -16 + i * 12))
+        t = Text2DNode(text="", position=Vector2(0, -26 + i * 10))
         cam.add_child(t)
         items.append(t)
 
@@ -198,21 +231,33 @@ def pause_menu(rom_filename, current_palette, audio_on):
             if engine_io.A.is_just_pressed or engine_io.MENU.is_just_pressed:
                 if engine_io.MENU.is_just_pressed:
                     result = "resume"
-                elif cursor == 0:
+                elif cursor == 0:  # Resume
                     result = "resume"
-                elif cursor == 1:
-                    current_palette = (current_palette + 1) % len(PALETTE_NAMES)
+                elif cursor == 1:  # Palette
+                    current_palette = (current_palette + 1) % gb_emu.PALETTE_COUNT
                     gb_emu.set_palette(current_palette)
                     refresh()
                     continue
-                elif cursor == 2:
+                elif cursor == 2:  # Audio
                     audio_on = not audio_on
                     gb_emu.set_audio_enabled(audio_on)
                     refresh()
                     continue
-                elif cursor == 3:
+                elif cursor == 3:  # Save State
+                    if save_state(rom_filename):
+                        items[3].text = "> State Saved!"
+                    else:
+                        items[3].text = "> Save Failed!"
+                    continue
+                elif cursor == 4:  # Load State
+                    if load_state(rom_filename):
+                        result = "resume"
+                    else:
+                        items[4].text = "> No State Found"
+                        continue
+                elif cursor == 5:  # Reset
                     result = "reset"
-                elif cursor == 4:
+                elif cursor == 6:  # Quit
                     result = "quit"
 
                 cam.mark_destroy_children()
@@ -225,6 +270,7 @@ selected = rom_browser(roms)
 if selected is None:
     engine.end()
 else:
+    gc.collect()
     rom_data = load_rom(selected)
     gb_emu.init(rom_data)
     current_palette = gb_emu.PALETTE_GREEN
@@ -242,30 +288,51 @@ else:
     running = True
     while running:
         if engine.tick():
-            # Build joypad bitmask
-            buttons = 0
-            if engine_io.A.is_pressed:
-                buttons |= gb_emu.BTN_A
-            if engine_io.B.is_pressed:
-                buttons |= gb_emu.BTN_B
+            # Hold LB + d-pad to pan the viewport
             if engine_io.LB.is_pressed:
-                buttons |= gb_emu.BTN_SELECT
-            if engine_io.RB.is_pressed:
-                buttons |= gb_emu.BTN_START
-            if engine_io.UP.is_pressed:
-                buttons |= gb_emu.BTN_UP
-            if engine_io.DOWN.is_pressed:
-                buttons |= gb_emu.BTN_DOWN
-            if engine_io.LEFT.is_pressed:
-                buttons |= gb_emu.BTN_LEFT
-            if engine_io.RIGHT.is_pressed:
-                buttons |= gb_emu.BTN_RIGHT
+                cx, cy = gb_emu.get_crop()
+                if engine_io.LEFT.is_pressed:
+                    cx -= PAN_SPEED
+                if engine_io.RIGHT.is_pressed:
+                    cx += PAN_SPEED
+                if engine_io.UP.is_pressed:
+                    cy -= PAN_SPEED
+                if engine_io.DOWN.is_pressed:
+                    cy += PAN_SPEED
+                gb_emu.set_crop(cx, cy)
+                # Don't send d-pad to GB while panning
+                buttons = 0
+                if engine_io.A.is_pressed:
+                    buttons |= gb_emu.BTN_A
+                if engine_io.B.is_pressed:
+                    buttons |= gb_emu.BTN_B
+                if engine_io.RB.is_pressed:
+                    buttons |= gb_emu.BTN_START
+                gb_emu.set_buttons(buttons)
+            else:
+                # Normal input
+                buttons = 0
+                if engine_io.A.is_pressed:
+                    buttons |= gb_emu.BTN_A
+                if engine_io.B.is_pressed:
+                    buttons |= gb_emu.BTN_B
+                if engine_io.LB.is_pressed:
+                    buttons |= gb_emu.BTN_SELECT
+                if engine_io.RB.is_pressed:
+                    buttons |= gb_emu.BTN_START
+                if engine_io.UP.is_pressed:
+                    buttons |= gb_emu.BTN_UP
+                if engine_io.DOWN.is_pressed:
+                    buttons |= gb_emu.BTN_DOWN
+                if engine_io.LEFT.is_pressed:
+                    buttons |= gb_emu.BTN_LEFT
+                if engine_io.RIGHT.is_pressed:
+                    buttons |= gb_emu.BTN_RIGHT
+                gb_emu.set_buttons(buttons)
 
-            gb_emu.set_buttons(buttons)
             gb_emu.run_frame()
 
             if engine_io.MENU.is_just_pressed:
-                # Pause
                 cam.mark_destroy()
                 result, current_palette, audio_on = pause_menu(selected, current_palette, audio_on)
 

@@ -5,14 +5,13 @@
 #include "gb_emu_core.h"
 
 /* gb_emu.init(rom_bytearray) -> None
- * Initialize the emulator with ROM data.
- * The bytearray must remain alive for the lifetime of the emulator. */
+ * Initialize the emulator with ROM data. */
 static mp_obj_t gb_emu_mp_init(mp_obj_t rom_obj) {
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(rom_obj, &bufinfo, MP_BUFFER_READ);
 
     if (bufinfo.len < 0x150) {
-        mp_raise_ValueError(MP_ERROR_TEXT("ROM too small (need >= 336 bytes for header)"));
+        mp_raise_ValueError(MP_ERROR_TEXT("ROM too small"));
     }
 
     int ret = gb_emu_init((uint8_t *)bufinfo.buf, bufinfo.len);
@@ -99,6 +98,49 @@ static mp_obj_t gb_emu_mp_set_audio_enabled(mp_obj_t enabled_obj) {
 }
 MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_set_audio_enabled_obj, gb_emu_mp_set_audio_enabled);
 
+/* gb_emu.set_crop(x, y) -> None */
+static mp_obj_t gb_emu_mp_set_crop(mp_obj_t x_obj, mp_obj_t y_obj) {
+    gb_emu_set_crop(mp_obj_get_int(x_obj), mp_obj_get_int(y_obj));
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(gb_emu_mp_set_crop_obj, gb_emu_mp_set_crop);
+
+/* gb_emu.get_crop() -> (x, y) */
+static mp_obj_t gb_emu_mp_get_crop(void) {
+    mp_obj_t items[2] = {
+        mp_obj_new_int(gb_emu_get_crop_x()),
+        mp_obj_new_int(gb_emu_get_crop_y()),
+    };
+    return mp_obj_new_tuple(2, items);
+}
+MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_get_crop_obj, gb_emu_mp_get_crop);
+
+/* gb_emu.save_state() -> bytearray or None on error */
+static mp_obj_t gb_emu_mp_save_state(void) {
+    size_t size = gb_emu_get_state_size();
+    /* Allocate zeroed buffer first, then fill */
+    uint8_t *buf = m_new(uint8_t, size);
+    if (!buf) return mp_const_none;
+    int ret = gb_emu_save_state(buf, size);
+    if (ret != 0) {
+        m_del(uint8_t, buf, size);
+        return mp_const_none;
+    }
+    mp_obj_t result = mp_obj_new_bytearray(size, buf);
+    m_del(uint8_t, buf, size);
+    return result;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_save_state_obj, gb_emu_mp_save_state);
+
+/* gb_emu.load_state(bytearray) -> bool */
+static mp_obj_t gb_emu_mp_load_state(mp_obj_t data_obj) {
+    mp_buffer_info_t bufinfo;
+    mp_get_buffer_raise(data_obj, &bufinfo, MP_BUFFER_READ);
+    int ret = gb_emu_load_state(bufinfo.buf, bufinfo.len);
+    return mp_obj_new_bool(ret == 0);
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_load_state_obj, gb_emu_mp_load_state);
+
 /* Module globals table */
 static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR___name__),       MP_OBJ_NEW_QSTR(MP_QSTR_gb_emu) },
@@ -112,6 +154,10 @@ static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_cart_ram),    MP_ROM_PTR(&gb_emu_mp_set_cart_ram_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_save_size),   MP_ROM_PTR(&gb_emu_mp_get_save_size_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_audio_enabled), MP_ROM_PTR(&gb_emu_mp_set_audio_enabled_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_set_crop),        MP_ROM_PTR(&gb_emu_mp_set_crop_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_get_crop),        MP_ROM_PTR(&gb_emu_mp_get_crop_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_save_state),      MP_ROM_PTR(&gb_emu_mp_save_state_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_load_state),      MP_ROM_PTR(&gb_emu_mp_load_state_obj) },
     /* Joypad constants for Python convenience */
     { MP_OBJ_NEW_QSTR(MP_QSTR_BTN_A),           MP_OBJ_NEW_SMALL_INT(JOYPAD_A) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_BTN_B),           MP_OBJ_NEW_SMALL_INT(JOYPAD_B) },
@@ -125,6 +171,10 @@ static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_GREEN),   MP_OBJ_NEW_SMALL_INT(GB_PALETTE_GREEN) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_GRAY),    MP_OBJ_NEW_SMALL_INT(GB_PALETTE_GRAY) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_POCKET),  MP_OBJ_NEW_SMALL_INT(GB_PALETTE_POCKET) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_CREAM),   MP_OBJ_NEW_SMALL_INT(GB_PALETTE_CREAM) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_BLUE),    MP_OBJ_NEW_SMALL_INT(GB_PALETTE_BLUE) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_RED),     MP_OBJ_NEW_SMALL_INT(GB_PALETTE_RED) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_PALETTE_COUNT),   MP_OBJ_NEW_SMALL_INT(GB_PALETTE_COUNT) },
 };
 
 static MP_DEFINE_CONST_DICT(mp_module_gb_emu_globals, gb_emu_globals_table);
