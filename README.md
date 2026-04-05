@@ -74,6 +74,23 @@ These instructions assume that you are cloning MicroPython from the TinyCircuits
 
 Use `(cd ../../ports/unix && make clean)` to make clean if needed
 
+## Audio in the Linux emulator
+The Linux emulator supports audio playback through SDL2. All 4 engine audio channels work, including WaveSoundResource, ToneSoundResource, and RTTTLSoundResource.
+
+SDL2 uses PulseAudio by default. On a standard Linux desktop this should work out of the box. On WSL2 (Windows Subsystem for Linux), audio requires **WSLg** which is included in Windows 11 and provides a PulseAudio server automatically.
+
+To verify audio is working, check for this line in the emulator startup output:
+```
+EngineAudio: SDL audio device opened (freq=22050, channels=1, samples=512)
+```
+
+### WSL2 audio troubleshooting
+- **WSLg required**: Audio relies on WSLg's PulseAudio server. Verify it's available: `ls /mnt/wslg/PulseServer`
+- **PULSE_SERVER**: Should be set automatically by WSLg. Verify: `echo $PULSE_SERVER` (expect `unix:/mnt/wslg/PulseServer`)
+- **PulseAudio client library**: Install if missing: `sudo apt install libpulse0`
+- **Windows 10**: WSLg is not available. You would need to run a PulseAudio server on Windows and forward it into WSL2 manually
+- **No sound but device opens**: Check Windows volume mixer — the WSLg PulseAudio sink may be muted
+
 # Building and Running On Linux Quickly 
 If you followed the one of two methods to setup everythign above, you can run the following from `micropython/TinyCircuits-Tiny-Game-Engine/filesystem` to build and run a MicroPython script on Linux quickly:
 

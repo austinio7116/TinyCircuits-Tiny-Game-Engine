@@ -45,6 +45,123 @@ float engine_audio_get_master_volume(){
 #elif defined(__unix__)
     #include <SDL2/SDL.h>
     SDL_AudioSpec audio;
+    SDL_AudioDeviceID sdl_audio_device = 0;
+
+
+    // Unix version: read wave samples directly from RAM (no DMA needed)
+    float get_wave_sample_unix(audio_channel_class_obj_t *channel, bool *complete){
+        sound_resource_base_class_obj_t *source = channel->source;
+
+        // Keep returning current sample until time to get next one
+        if(source->play_counter != 0){
+            if(source->play_counter == source->play_counter_max){
+                source->play_counter = 0;
+            }else{
+                source->play_counter++;
+                return source->last_sample;
+            }
+        }
+
+        // Check if we've reached the end of the data
+        if(channel->source_byte_offset >= source->total_data_size){
+            channel->source_byte_offset = 0;
+            if(channel->loop == false){
+                *complete = true;
+                return 0.0f;
+            }
+        }
+
+        // Read sample directly from RAM
+        uint8_t *data = ((mp_obj_array_t*)source->extra_data)->items;
+        uint32_t offset = channel->source_byte_offset;
+
+        switch(source->bytes_per_sample){
+            case 1:
+            {
+                uint8_t sample_byte = data[offset];
+                source->last_sample = (int8_t)(sample_byte - 128);
+                source->last_sample = source->last_sample / (float)INT8_MAX;
+            }
+            break;
+            case 2:
+            {
+                uint8_t sample_byte_lsb = data[offset];
+                uint8_t sample_byte_msb = data[offset + 1];
+                source->last_sample = (int16_t)((sample_byte_msb << 8) + sample_byte_lsb);
+                source->last_sample = source->last_sample / (float)INT16_MAX;
+            }
+            break;
+            default:
+                return 0.0f;
+        }
+
+        channel->source_byte_offset += source->bytes_per_sample;
+        channel->time = (1.0f / source->sample_rate) * (channel->source_byte_offset / source->bytes_per_sample);
+        source->play_counter++;
+
+        return source->last_sample;
+    }
+
+
+    // SDL audio callback — called from audio thread at 22050Hz sample rate
+    void sdl_audio_callback(void *userdata, Uint8 *stream, int len){
+        int16_t *out = (int16_t *)stream;
+        int sample_count = len / sizeof(int16_t);
+
+        for(int s = 0; s < sample_count; s++){
+            float total_sample = 0;
+            bool play_sample = false;
+
+            for(uint8_t icx = 0; icx < CHANNEL_COUNT; icx++){
+                bool complete = false;
+                audio_channel_class_obj_t *channel = (audio_channel_class_obj_t*)channels[icx];
+
+                if(channel->source == NULL || channel->busy){
+                    continue;
+                }
+
+                play_sample = true;
+                float sample = 0.0f;
+
+                if(mp_obj_is_type(channel->source, &wave_sound_resource_class_type)){
+                    sample = get_wave_sample_unix(channel, &complete);
+                }else if(mp_obj_is_type(channel->source, &tone_sound_resource_class_type)){
+                    sample = tone_sound_resource_get_sample(channel->source);
+                }else if(mp_obj_is_type(channel->source, &rtttl_sound_resource_class_type)){
+                    sample = rtttl_sound_resource_get_sample(channel->source, &complete);
+                }
+
+                channel->amplitude = sample;
+                total_sample += sample * channel->gain * game_volume * master_volume;
+
+                if(complete && channel->loop == false){
+                    audio_channel_stop(channel);
+                }
+            }
+
+            /* Mix in GB emulator audio if available */
+            {
+                extern float gb_emu_get_audio_sample(void) __attribute__((weak));
+                if(gb_emu_get_audio_sample){
+                    float gb_sample = gb_emu_get_audio_sample();
+                    if(gb_sample != 0.0f){
+                        total_sample += gb_sample * master_volume;
+                        play_sample = true;
+                    }
+                }
+            }
+
+            if(play_sample){
+                // Clamp to -1.0 ~ 1.0, then scale to int16 range
+                if(total_sample > 1.0f) total_sample = 1.0f;
+                if(total_sample < -1.0f) total_sample = -1.0f;
+                out[s] = (int16_t)(total_sample * 32767.0f);
+            }else{
+                out[s] = 0;
+            }
+        }
+    }
+
 #elif defined(__arm__)
     #include "pico/stdlib.h"
     #include "hardware/dma.h"
@@ -280,7 +397,9 @@ void engine_audio_setup_playback(){
     #if defined(__EMSCRIPTEN__)
         // Nothing to do
     #elif defined(__unix__)
-        // Nothing to do
+        if(sdl_audio_device != 0){
+            SDL_PauseAudioDevice(sdl_audio_device, 0);  // Unpause to start playback
+        }
     #elif defined(__arm__)
         // Setup amplifier but make sure it is disabled while PWM is being setup
         gpio_init(AUDIO_ENABLE_PIN);
@@ -330,8 +449,21 @@ void engine_audio_setup(){
     #if defined(__EMSCRIPTEN__)
         // Nothing to do
     #elif defined(__unix__)
-        audio.freq = 22050;
-        audio.format = AUDIO_U16;
+        SDL_AudioSpec want, have;
+        SDL_memset(&want, 0, sizeof(want));
+        want.freq = 22050;
+        want.format = AUDIO_S16SYS;
+        want.channels = 1;
+        want.samples = 512;
+        want.callback = sdl_audio_callback;
+
+        sdl_audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+        if(sdl_audio_device == 0){
+            ENGINE_ERROR_PRINTF("EngineAudio: Failed to open SDL audio device: %s", SDL_GetError());
+        }else{
+            ENGINE_PRINTF("EngineAudio: SDL audio device opened (freq=%d, channels=%d, samples=%d)\n",
+                          have.freq, have.channels, have.samples);
+        }
     #elif defined(__arm__)
         // Start the main ENGINE_AUDIO_SAMPLE_RATE (22050Hz) audio sample rate playback interrupt
         //
