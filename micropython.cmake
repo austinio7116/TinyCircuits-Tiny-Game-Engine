@@ -4,3 +4,4 @@
 # used to prefix subdirectories.
 
 include(${CMAKE_CURRENT_LIST_DIR}/src/micropython.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/gbemu/micropython.cmake)

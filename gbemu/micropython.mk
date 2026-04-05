@@ -1,0 +1,6 @@
+GBEMU_MOD_DIR := $(USERMOD_DIR)
+
+SRC_USERMOD += $(GBEMU_MOD_DIR)/gb_emu_module.c
+SRC_USERMOD += $(GBEMU_MOD_DIR)/gb_emu_core.c
+
+CFLAGS_USERMOD += -I$(GBEMU_MOD_DIR)
