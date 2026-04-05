@@ -119,12 +119,22 @@ static mp_obj_t gb_emu_mp_set_show_fps(mp_obj_t show_obj) {
 MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_set_show_fps_obj, gb_emu_mp_set_show_fps);
 
 /* gb_emu.run_loop() -> int (frame count)
- * High-performance all-C frame loop. Runs until MENU pressed. */
+ * High-performance all-C frame loop. Runs until MENU pressed.
+ * Frees dynamic buffers on exit to release memory for other games. */
 static mp_obj_t gb_emu_mp_run_loop(void) {
     int frames = gb_emu_run_loop();
+    gb_emu_deinit();
     return mp_obj_new_int(frames);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_run_loop_obj, gb_emu_mp_run_loop);
+
+/* gb_emu.deinit() -> None
+ * Free dynamic buffers (cart RAM, bank cache, audio ring). */
+static mp_obj_t gb_emu_mp_deinit(void) {
+    gb_emu_deinit();
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_deinit_obj, gb_emu_mp_deinit);
 
 /* gb_emu.set_audio_enabled(bool) -> None */
 static mp_obj_t gb_emu_mp_set_audio_enabled(mp_obj_t enabled_obj) {
@@ -180,6 +190,7 @@ MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_load_state_obj, gb_emu_mp_load_state);
 static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR___name__),       MP_OBJ_NEW_QSTR(MP_QSTR_gb_emu) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_init),            MP_ROM_PTR(&gb_emu_mp_init_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_deinit),          MP_ROM_PTR(&gb_emu_mp_deinit_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_run_frame),       MP_ROM_PTR(&gb_emu_mp_run_frame_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_buttons),     MP_ROM_PTR(&gb_emu_mp_set_buttons_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_reset),           MP_ROM_PTR(&gb_emu_mp_reset_obj) },

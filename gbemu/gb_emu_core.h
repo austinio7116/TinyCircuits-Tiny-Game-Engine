@@ -94,4 +94,8 @@ size_t gb_emu_get_state_size(void);
 int gb_emu_save_state(uint8_t *buf, size_t buf_size);
 int gb_emu_load_state(const uint8_t *buf, size_t buf_size);
 
+/* Free dynamically allocated buffers (cart_ram, bank cache, audio ring).
+ * Call when exiting the emulator to release memory for other games. */
+void gb_emu_deinit(void);
+
 #endif /* GB_EMU_CORE_H */

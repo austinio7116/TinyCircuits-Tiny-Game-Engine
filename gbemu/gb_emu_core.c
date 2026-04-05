@@ -15,13 +15,17 @@ extern uint16_t *active_screen_buffer;
 static struct gb_s gb;
 static uint8_t *rom_ptr = NULL;
 static size_t rom_len = 0;
-static uint8_t cart_ram[0x8000]; /* 32KB max cart RAM */
 static int initialized = 0;
+
+/* Dynamically allocated buffers — only use memory when GBEmu is active */
+#define CART_RAM_SIZE 0x8000  /* 32KB max cart RAM */
+static uint8_t *cart_ram = NULL;
 
 /* File-based ROM reading: 8-bank cache (128KB) for large ROMs */
 #define ROM_BANK_CACHE_SIZE 0x4000  /* 16KB per bank (GB ROM bank size) */
 #define ROM_BANK_COUNT 8
-static uint8_t rom_bank_cache[ROM_BANK_COUNT][ROM_BANK_CACHE_SIZE];
+static uint8_t *rom_bank_cache_flat = NULL;  /* ROM_BANK_COUNT * ROM_BANK_CACHE_SIZE bytes */
+#define ROM_BANK_CACHE(i) (rom_bank_cache_flat + (i) * ROM_BANK_CACHE_SIZE)
 static int32_t rom_bank_ids[ROM_BANK_COUNT];  /* which bank is cached, -1 = empty */
 static uint8_t rom_bank_age[ROM_BANK_COUNT];  /* for LRU eviction */
 static uint8_t rom_bank_age_counter = 0;
@@ -66,7 +70,7 @@ static int16_t apu_frame_buf[GB_APU_FRAME_SAMPLES];
 
 /* Ring buffer for mono audio samples consumed by engine */
 #define GB_AUDIO_RING_SIZE 4096
-static int16_t audio_ring[GB_AUDIO_RING_SIZE];
+static int16_t *audio_ring = NULL;
 static volatile uint16_t audio_ring_write = 0;
 static volatile uint16_t audio_ring_read = 0;
 static int audio_enabled = 1;
@@ -89,7 +93,7 @@ static uint8_t gb_rom_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
     for (int i = 0; i < ROM_BANK_COUNT; i++) {
         if (rom_bank_ids[i] == bank_id) {
             rom_bank_age[i] = ++rom_bank_age_counter;
-            return rom_bank_cache[i][bank_offset];
+            return ROM_BANK_CACHE(i)[bank_offset];
         }
     }
 
@@ -120,21 +124,21 @@ static uint8_t gb_rom_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
     size_t to_read = ROM_BANK_CACHE_SIZE;
     if (file_offset + to_read > rom_len)
         to_read = rom_len - file_offset;
-    memset(rom_bank_cache[slot], 0xFF, ROM_BANK_CACHE_SIZE);
+    memset(ROM_BANK_CACHE(slot), 0xFF, ROM_BANK_CACHE_SIZE);
     int errcode = 0;
-    stream_p->read(stream, rom_bank_cache[slot], to_read, &errcode);
+    stream_p->read(stream, ROM_BANK_CACHE(slot), to_read, &errcode);
 
-    return rom_bank_cache[slot][bank_offset];
+    return ROM_BANK_CACHE(slot)[bank_offset];
 }
 
 static uint8_t gb_cart_ram_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
-    if (addr < sizeof(cart_ram))
+    if (addr < CART_RAM_SIZE)
         return cart_ram[addr];
     return 0xFF;
 }
 
 static void gb_cart_ram_write_cb(struct gb_s *gb, const uint_fast32_t addr, const uint8_t val) {
-    if (addr < sizeof(cart_ram))
+    if (addr < CART_RAM_SIZE)
         cart_ram[addr] = val;
 }
 
@@ -164,7 +168,21 @@ uint8_t audio_read(uint16_t addr) {
 /* --- Public API --- */
 
 static void gb_emu_common_init(void) {
-    memset(cart_ram, 0, sizeof(cart_ram));
+    /* Allocate buffers on first use — using MicroPython GC heap (m_new) */
+    if (cart_ram == NULL) {
+        cart_ram = m_new(uint8_t, CART_RAM_SIZE);
+        memset(cart_ram, 0, CART_RAM_SIZE);
+    } else {
+        memset(cart_ram, 0, CART_RAM_SIZE);
+    }
+    if (rom_bank_cache_flat == NULL) {
+        rom_bank_cache_flat = m_new(uint8_t, ROM_BANK_COUNT * ROM_BANK_CACHE_SIZE);
+    }
+    if (audio_ring == NULL) {
+        audio_ring = m_new(int16_t, GB_AUDIO_RING_SIZE);
+        memset(audio_ring, 0, GB_AUDIO_RING_SIZE * sizeof(int16_t));
+    }
+
     gb_emu_set_palette(GB_PALETTE_GREEN);
     for (int i = 0; i < ROM_BANK_COUNT; i++) {
         rom_bank_ids[i] = -1;
@@ -207,13 +225,13 @@ int gb_emu_init_file(void *file_obj, size_t file_size) {
     /* Pre-cache bank 0 (contains header, always needed) */
     rom_bank_ids[0] = 0;
     size_t to_read = rom_len < ROM_BANK_CACHE_SIZE ? rom_len : ROM_BANK_CACHE_SIZE;
-    memset(rom_bank_cache[0], 0xFF, ROM_BANK_CACHE_SIZE);
+    memset(ROM_BANK_CACHE(0), 0xFF, ROM_BANK_CACHE_SIZE);
 
     const mp_stream_p_t *stream_p = mp_get_stream(rom_file_obj);
     struct mp_stream_seek_t seek_s = { .offset = 0, .whence = 0 };
     stream_p->ioctl(rom_file_obj, MP_STREAM_SEEK, (mp_uint_t)(uintptr_t)&seek_s, NULL);
     int errcode = 0;
-    stream_p->read(rom_file_obj, rom_bank_cache[0], to_read, &errcode);
+    stream_p->read(rom_file_obj, ROM_BANK_CACHE(0), to_read, &errcode);
 
     enum gb_init_error_e ret = gb_init(&gb, gb_rom_read_cb, gb_cart_ram_read_cb,
                                         gb_cart_ram_write_cb, gb_error_cb, NULL);
@@ -445,8 +463,8 @@ uint8_t *gb_emu_get_cart_ram(size_t *size_out) {
 }
 
 void gb_emu_set_cart_ram(const uint8_t *data, size_t size) {
-    if (size > sizeof(cart_ram))
-        size = sizeof(cart_ram);
+    if (size > CART_RAM_SIZE)
+        size = CART_RAM_SIZE;
     memcpy(cart_ram, data, size);
 }
 
@@ -496,4 +514,15 @@ size_t gb_emu_get_save_size(void) {
     size_t ram_size = 0;
     gb_get_save_size_s(&gb, &ram_size);
     return ram_size;
+}
+
+void gb_emu_deinit(void) {
+    initialized = 0;
+    rom_ptr = NULL;
+    rom_len = 0;
+    rom_file_obj = MP_OBJ_NULL;
+
+    if (cart_ram != NULL) { m_del(uint8_t, cart_ram, CART_RAM_SIZE); cart_ram = NULL; }
+    if (rom_bank_cache_flat != NULL) { m_del(uint8_t, rom_bank_cache_flat, ROM_BANK_COUNT * ROM_BANK_CACHE_SIZE); rom_bank_cache_flat = NULL; }
+    if (audio_ring != NULL) { m_del(int16_t, audio_ring, GB_AUDIO_RING_SIZE); audio_ring = NULL; }
 }
