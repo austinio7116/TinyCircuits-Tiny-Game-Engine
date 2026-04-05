@@ -4,17 +4,37 @@
 #include "py/objstr.h"
 #include "gb_emu_core.h"
 
-/* gb_emu.init(rom_bytearray) -> None
- * Initialize the emulator with ROM data. */
-static mp_obj_t gb_emu_mp_init(mp_obj_t rom_obj) {
-    mp_buffer_info_t bufinfo;
-    mp_get_buffer_raise(rom_obj, &bufinfo, MP_BUFFER_READ);
+/* Keep a reference to the ROM file object to prevent GC */
+static mp_obj_t rom_file_ref = MP_OBJ_NULL;
 
-    if (bufinfo.len < 0x150) {
-        mp_raise_ValueError(MP_ERROR_TEXT("ROM too small"));
+/* gb_emu.init(rom_bytearray_or_file_tuple) -> None
+ * Initialize with ROM data (bytearray) or (file_obj, size) tuple for on-demand reading. */
+static mp_obj_t gb_emu_mp_init(mp_obj_t rom_obj) {
+    int ret;
+
+    if (mp_obj_is_type(rom_obj, &mp_type_tuple)) {
+        /* Tuple mode: (file_obj, size) for file-based reading */
+        size_t len;
+        mp_obj_t *items;
+        mp_obj_tuple_get(rom_obj, &len, &items);
+        if (len != 2) {
+            mp_raise_ValueError(MP_ERROR_TEXT("Expected (file, size) tuple"));
+        }
+        rom_file_ref = items[0];  /* prevent GC of file object */
+        size_t rom_size = (size_t)mp_obj_get_int(items[1]);
+        ret = gb_emu_init_file((void *)items[0], rom_size);
+    } else {
+        /* Bytearray mode: ROM in memory */
+        mp_buffer_info_t bufinfo;
+        mp_get_buffer_raise(rom_obj, &bufinfo, MP_BUFFER_READ);
+
+        if (bufinfo.len < 0x150) {
+            mp_raise_ValueError(MP_ERROR_TEXT("ROM too small"));
+        }
+
+        ret = gb_emu_init((uint8_t *)bufinfo.buf, bufinfo.len);
     }
 
-    int ret = gb_emu_init((uint8_t *)bufinfo.buf, bufinfo.len);
     if (ret != 0) {
         mp_raise_msg_varg(&mp_type_RuntimeError,
             MP_ERROR_TEXT("gb_init failed with error %d"), -ret);

@@ -41,8 +41,12 @@ uint8_t audio_read(uint16_t addr);
 #define GB_PALETTE_RED    5
 #define GB_PALETTE_COUNT  6
 
-/* Initialize the emulator with ROM data. Returns 0 on success, negative on error. */
+/* Initialize the emulator with ROM data in memory. Returns 0 on success, negative on error. */
 int gb_emu_init(uint8_t *rom_data, size_t rom_size);
+
+/* Initialize the emulator reading ROM from file on demand (for large ROMs).
+ * file_obj is a MicroPython file object (must stay open). */
+int gb_emu_init_file(void *file_obj, size_t rom_size);
 
 /* Run one full frame (~70224 CPU cycles). Renders to active_screen_buffer. */
 void gb_emu_run_frame(void);

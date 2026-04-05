@@ -3,6 +3,9 @@
 #include "minigb_apu.h"
 #include <string.h>
 #include <stdio.h>
+#include "py/obj.h"
+#include "py/runtime.h"
+#include "py/stream.h"
 
 /* Engine's active framebuffer — defined in engine_display_common.c */
 extern uint16_t *active_screen_buffer;
@@ -13,6 +16,15 @@ static uint8_t *rom_ptr = NULL;
 static size_t rom_len = 0;
 static uint8_t cart_ram[0x8000]; /* 32KB max cart RAM */
 static int initialized = 0;
+
+/* File-based ROM reading: 8-bank cache (128KB) for large ROMs */
+#define ROM_BANK_CACHE_SIZE 0x4000  /* 16KB per bank (GB ROM bank size) */
+#define ROM_BANK_COUNT 8
+static uint8_t rom_bank_cache[ROM_BANK_COUNT][ROM_BANK_CACHE_SIZE];
+static int32_t rom_bank_ids[ROM_BANK_COUNT];  /* which bank is cached, -1 = empty */
+static uint8_t rom_bank_age[ROM_BANK_COUNT];  /* for LRU eviction */
+static uint8_t rom_bank_age_counter = 0;
+static mp_obj_t rom_file_obj = MP_OBJ_NULL;  /* MP_OBJ_NULL = in-memory mode */
 
 /* Display crop offsets: center 128x128 in 160x144 */
 #define GB_SCREEN_W  160
@@ -61,9 +73,57 @@ static int audio_enabled = 1;
 /* --- Peanut-GB callbacks --- */
 
 static uint8_t gb_rom_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
-    if (addr < rom_len)
+    if (addr >= rom_len)
+        return 0xFF;
+
+    /* In-memory mode: direct access */
+    if (rom_ptr != NULL)
         return rom_ptr[addr];
-    return 0xFF;
+
+    /* File-based mode: read from bank cache */
+    int32_t bank_id = (int32_t)(addr / ROM_BANK_CACHE_SIZE);
+    uint32_t bank_offset = addr % ROM_BANK_CACHE_SIZE;
+
+    /* Check if bank is cached */
+    for (int i = 0; i < ROM_BANK_COUNT; i++) {
+        if (rom_bank_ids[i] == bank_id) {
+            rom_bank_age[i] = ++rom_bank_age_counter;
+            return rom_bank_cache[i][bank_offset];
+        }
+    }
+
+    /* Cache miss: find LRU slot (oldest age) */
+    int slot = 0;
+    uint8_t oldest = rom_bank_age[0];
+    for (int i = 1; i < ROM_BANK_COUNT; i++) {
+        /* Prefer empty slots first */
+        if (rom_bank_ids[i] < 0) { slot = i; break; }
+        if ((uint8_t)(rom_bank_age[i] - oldest) > 127) {
+            /* rom_bank_age[i] is older (wrapping comparison) */
+            oldest = rom_bank_age[i];
+            slot = i;
+        }
+    }
+
+    rom_bank_ids[slot] = bank_id;
+    rom_bank_age[slot] = ++rom_bank_age_counter;
+    uint32_t file_offset = bank_id * ROM_BANK_CACHE_SIZE;
+
+    /* Seek to bank offset using MicroPython stream API */
+    struct mp_stream_seek_t seek_s = { .offset = file_offset, .whence = 0 };
+    mp_obj_t stream = rom_file_obj;
+    const mp_stream_p_t *stream_p = mp_get_stream(stream);
+    stream_p->ioctl(stream, MP_STREAM_SEEK, (mp_uint_t)(uintptr_t)&seek_s, NULL);
+
+    /* Read bank data */
+    size_t to_read = ROM_BANK_CACHE_SIZE;
+    if (file_offset + to_read > rom_len)
+        to_read = rom_len - file_offset;
+    memset(rom_bank_cache[slot], 0xFF, ROM_BANK_CACHE_SIZE);
+    int errcode = 0;
+    stream_p->read(stream, rom_bank_cache[slot], to_read, &errcode);
+
+    return rom_bank_cache[slot][bank_offset];
 }
 
 static uint8_t gb_cart_ram_read_cb(struct gb_s *gb, const uint_fast32_t addr) {
@@ -102,12 +162,21 @@ uint8_t audio_read(uint16_t addr) {
 
 /* --- Public API --- */
 
+static void gb_emu_common_init(void) {
+    memset(cart_ram, 0, sizeof(cart_ram));
+    gb_emu_set_palette(GB_PALETTE_GREEN);
+    for (int i = 0; i < ROM_BANK_COUNT; i++) {
+        rom_bank_ids[i] = -1;
+        rom_bank_age[i] = 0;
+    }
+    rom_bank_age_counter = 0;
+}
+
 int gb_emu_init(uint8_t *rom_data, size_t rom_size) {
+    rom_file_obj = MP_OBJ_NULL;
     rom_ptr = rom_data;
     rom_len = rom_size;
-    memset(cart_ram, 0, sizeof(cart_ram));
-
-    gb_emu_set_palette(GB_PALETTE_GREEN);
+    gb_emu_common_init();
 
     enum gb_init_error_e ret = gb_init(&gb, gb_rom_read_cb, gb_cart_ram_read_cb,
                                         gb_cart_ram_write_cb, gb_error_cb, NULL);
@@ -115,13 +184,48 @@ int gb_emu_init(uint8_t *rom_data, size_t rom_size) {
         return -(int)ret;
 
     gb_init_lcd(&gb, lcd_draw_line_cb);
-
-    /* Initialize audio */
     minigb_apu_audio_init(&apu_ctx);
     audio_ring_write = 0;
     audio_ring_read = 0;
     audio_enabled = 1;
+    initialized = 1;
+    return 0;
+}
 
+int gb_emu_init_file(void *file_obj, size_t file_size) {
+    rom_file_obj = MP_OBJ_NULL;
+    rom_ptr = NULL;
+    rom_len = file_size;
+
+    if (rom_len < 0x150)
+        return -101;
+
+    rom_file_obj = (mp_obj_t)file_obj;
+    gb_emu_common_init();
+
+    /* Pre-cache bank 0 (contains header, always needed) */
+    rom_bank_ids[0] = 0;
+    size_t to_read = rom_len < ROM_BANK_CACHE_SIZE ? rom_len : ROM_BANK_CACHE_SIZE;
+    memset(rom_bank_cache[0], 0xFF, ROM_BANK_CACHE_SIZE);
+
+    const mp_stream_p_t *stream_p = mp_get_stream(rom_file_obj);
+    struct mp_stream_seek_t seek_s = { .offset = 0, .whence = 0 };
+    stream_p->ioctl(rom_file_obj, MP_STREAM_SEEK, (mp_uint_t)(uintptr_t)&seek_s, NULL);
+    int errcode = 0;
+    stream_p->read(rom_file_obj, rom_bank_cache[0], to_read, &errcode);
+
+    enum gb_init_error_e ret = gb_init(&gb, gb_rom_read_cb, gb_cart_ram_read_cb,
+                                        gb_cart_ram_write_cb, gb_error_cb, NULL);
+    if (ret != GB_INIT_NO_ERROR) {
+        rom_file_obj = MP_OBJ_NULL;
+        return -(int)ret;
+    }
+
+    gb_init_lcd(&gb, lcd_draw_line_cb);
+    minigb_apu_audio_init(&apu_ctx);
+    audio_ring_write = 0;
+    audio_ring_read = 0;
+    audio_enabled = 1;
     initialized = 1;
     return 0;
 }

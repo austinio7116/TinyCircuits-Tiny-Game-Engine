@@ -31,10 +31,16 @@ def load_rom(filename):
     gc.collect()
     path = ROM_DIR + "/" + filename
     size = os.stat(path)[6]
-    buf = bytearray(size)
-    with open(path, "rb") as f:
-        f.readinto(buf)
-    return buf
+    try:
+        buf = bytearray(size)
+        with open(path, "rb") as f:
+            f.readinto(buf)
+        return buf
+    except MemoryError:
+        # ROM too large for heap — use file-based on-demand reading
+        print("GBEmu: ROM too large for RAM, using file streaming")
+        f = open(path, "rb")
+        return (f, size)  # return (file_obj, size) tuple for C init
 
 def base_name(rom_filename):
     return rom_filename.rsplit('.', 1)[0]
@@ -281,6 +287,7 @@ else:
     print("GBEmu: Loaded", rom_name)
     gc.collect()
 
+    engine.freq(250 * 1000 * 1000)  # Overclock to 250MHz for file-streaming performance
     engine.fps_limit(60)
     cam = CameraNode()
 
