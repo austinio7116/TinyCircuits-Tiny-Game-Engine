@@ -12,6 +12,86 @@
 #include "io/engine_io_buttons.h"
 #include <string.h>
 
+/* Dual-core support: RP2350 only */
+#if defined(__arm__)
+#define CHESS_DUAL_CORE 1
+#include "pico/multicore.h"
+#include "pico/time.h"
+#else
+#define CHESS_DUAL_CORE 0
+#endif
+
+/* ---- Dual-core AI search ---- */
+
+#define SEARCH_IDLE      0
+#define SEARCH_RUNNING   1
+#define SEARCH_DONE      2
+
+static volatile int search_state = SEARCH_IDLE;
+static volatile uint8_t search_result_from;
+static volatile uint8_t search_result_to;
+static volatile int search_result_valid;  /* 1 = move found, 0 = no moves */
+
+#if CHESS_DUAL_CORE
+/* Search parameters — set by core 0 before launching core 1 */
+static uint32_t search_node_limit;
+static uint32_t search_depth_limit;
+/* Core 1 stack — 8KB for recursive search */
+static uint32_t core1_stack[2048];  /* 8KB */
+static int core1_launched = 0;
+
+static void core1_search_entry(void) {
+    while (1) {
+        /* Wait for search command from core 0 */
+        uint32_t cmd = multicore_fifo_pop_blocking();
+        (void)cmd;
+
+        search_state = SEARCH_RUNNING;
+        mcumax_move best = mcumax_search_best_move(search_node_limit, search_depth_limit);
+
+        if (best.from != MCUMAX_SQUARE_INVALID) {
+            search_result_from = best.from;
+            search_result_to = best.to;
+            search_result_valid = 1;
+        } else {
+            search_result_valid = 0;
+        }
+        search_state = SEARCH_DONE;
+    }
+}
+
+static void launch_core1_if_needed(void) {
+    if (!core1_launched) {
+        multicore_launch_core1_with_stack(core1_search_entry,
+            core1_stack, sizeof(core1_stack));
+        core1_launched = 1;
+    }
+}
+
+static void start_search_async(uint32_t nodes, uint32_t depth) {
+    launch_core1_if_needed();
+    search_node_limit = nodes;
+    search_depth_limit = depth;
+    search_state = SEARCH_RUNNING;
+    multicore_fifo_push_blocking(1);  /* signal core 1 to start */
+}
+#endif /* CHESS_DUAL_CORE */
+
+/* Start search — async on device, blocking on emulator */
+static void start_ai_search(uint32_t nodes, uint32_t depth) {
+#if CHESS_DUAL_CORE
+    start_search_async(nodes, depth);
+#else
+    /* Blocking fallback for unix emulator */
+    search_state = SEARCH_RUNNING;
+    mcumax_move best = mcumax_search_best_move(nodes, depth);
+    search_result_from = best.from;
+    search_result_to = best.to;
+    search_result_valid = (best.from != MCUMAX_SQUARE_INVALID);
+    search_state = SEARCH_DONE;
+#endif
+}
+
 /* Engine framebuffer */
 extern uint16_t *active_screen_buffer;
 
@@ -104,6 +184,10 @@ static struct {
     int sprite_w, sprite_h;
     uint16_t *board_data;
     int board_w, board_h;
+
+    /* Board snapshot — used during AI thinking to avoid rendering search internals */
+    uint8_t board_snapshot[64];  /* piece codes, rank-major */
+    int use_snapshot;
 } game;
 
 /* Difficulty settings: node limit and depth limit */
@@ -284,6 +368,26 @@ static void blit_board_tile(int screen_x, int screen_y, int tile_idx) {
     }
 }
 
+/* Take a snapshot of the current board for rendering during AI search */
+static void take_board_snapshot(void) {
+    for (int rank = 0; rank < 8; rank++) {
+        for (int file = 0; file < 8; file++) {
+            mcumax_square sq = (rank << 4) | file;
+            game.board_snapshot[rank * 8 + file] = mcumax_get_piece(sq);
+        }
+    }
+    game.use_snapshot = 1;
+}
+
+/* Get piece at (file, rank) — uses snapshot if active, otherwise live board */
+static uint8_t get_piece_for_render(int file, int rank) {
+    if (game.use_snapshot) {
+        return game.board_snapshot[rank * 8 + file];
+    }
+    mcumax_square sq = (rank << 4) | file;
+    return mcumax_get_piece(sq);
+}
+
 /* Convert mcu-max piece to sprite column index.
  * mcu-max pieces (after get_piece XOR): type in bits 0-2, black in bit 3.
  * Types: 0=empty, 1=pawn_up, 2=pawn_down, 3=knight, 4=king, 5=bishop, 6=rook, 7=queen */
@@ -361,8 +465,7 @@ static void draw_board(void) {
 
             /* Valid move dots */
             if (game.selected && is_valid_target(file, rank)) {
-                mcumax_square sq = (rank << 4) | file;
-                mcumax_piece p = mcumax_get_piece(sq);
+                mcumax_piece p = get_piece_for_render(file, rank);
                 if ((p & 0x7) == MCUMAX_EMPTY) {
                     /* Empty square: small dot in center */
                     fill_rect(screen_x + 6, screen_y + 6, 4, 4, COLOR_VALID_MOVE);
@@ -376,8 +479,7 @@ static void draw_board(void) {
             }
 
             /* Draw piece */
-            mcumax_square sq = (rank << 4) | file;
-            mcumax_piece piece = mcumax_get_piece(sq);
+            mcumax_piece piece = get_piece_for_render(file, rank);
             if ((piece & 0x7) != MCUMAX_EMPTY) {
                 int col_idx = piece_to_sprite_col(piece);
                 int is_black = (piece & MCUMAX_BLACK) != 0;
@@ -667,7 +769,7 @@ static void tick_ai_thinking(void) {
 
     /* Animated "thinking" indicator */
     game.think_frame++;
-    if (game.think_frame % 15 == 0) {
+    if (game.think_frame % 10 == 0) {
         game.think_dots = (game.think_dots + 1) % 4;
     }
 
@@ -680,21 +782,26 @@ static void tick_ai_thinking(void) {
     buf[8 + game.think_dots] = '\0';
     draw_text(35, SCREEN_H - 9, buf, COLOR_TEXT_WHITE);
 
-    /* On first frame, actually compute the AI move (blocking) */
-    if (game.think_frame == 2) {
+    /* Frame 1: snapshot the board and launch the search */
+    if (game.think_frame == 1) {
+        take_board_snapshot();  /* freeze board for rendering while search runs */
         uint32_t nodes = diff_nodes[game.difficulty];
         uint32_t depth = diff_depth[game.difficulty];
+        start_ai_search(nodes, depth);
+    }
 
-        mcumax_move best = mcumax_search_best_move(nodes, depth);
-        if (best.from != MCUMAX_SQUARE_INVALID) {
+    /* Poll for search completion */
+    if (search_state == SEARCH_DONE) {
+        game.use_snapshot = 0;  /* back to live board */
+        if (search_result_valid) {
             /* Record move for highlight */
             game.has_last_move = 1;
-            game.last_from_file = best.from & 0x7;
-            game.last_from_rank = best.from >> 4;
-            game.last_to_file = best.to & 0x7;
-            game.last_to_rank = best.to >> 4;
+            game.last_from_file = search_result_from & 0x7;
+            game.last_from_rank = search_result_from >> 4;
+            game.last_to_file = search_result_to & 0x7;
+            game.last_to_rank = search_result_to >> 4;
 
-            mcumax_play_move(best);
+            mcumax_play_move((mcumax_move){search_result_from, search_result_to});
 
             check_game_end();
             if (game.state != STATE_GAME_OVER) {
@@ -706,6 +813,7 @@ static void tick_ai_thinking(void) {
             game.winner_is_white = game.player_is_white;
             enter_state(STATE_GAME_OVER);
         }
+        search_state = SEARCH_IDLE;
     }
 }
 
@@ -760,8 +868,14 @@ int chess_game_run_loop(void) {
         if (!engine_tick())
             continue;
 
-        if (button_is_just_pressed(&BUTTON_MENU))
+        if (button_is_just_pressed(&BUTTON_MENU)) {
+#if CHESS_DUAL_CORE
+            /* Abort any running search before exiting */
+            if (search_state == SEARCH_RUNNING)
+                mcumax_stop_search();
+#endif
             break;
+        }
 
         switch (game.state) {
             case STATE_TITLE:       tick_title(); break;
@@ -778,6 +892,23 @@ int chess_game_run_loop(void) {
         if (MP_STATE_THREAD(mp_pending_exception) != MP_OBJ_NULL)
             break;
     }
+
+#if CHESS_DUAL_CORE
+    /* Stop core 1 when exiting the game loop */
+    if (core1_launched) {
+        /* If a search is still running, abort it */
+        if (search_state == SEARCH_RUNNING) {
+            mcumax_stop_search();
+            /* Wait for it to finish */
+            while (search_state == SEARCH_RUNNING) {
+                tight_loop_contents();
+            }
+        }
+        multicore_reset_core1();
+        core1_launched = 0;
+    }
+#endif
+    search_state = SEARCH_IDLE;
 
     return frames;
 }
