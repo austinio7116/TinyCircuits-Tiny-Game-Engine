@@ -25,9 +25,9 @@
 
     void engine_display_sdl_init(){
         // https://dev.to/noah11012/using-sdl2-opening-a-window-79c
-        if(SDL_Init(SDL_INIT_VIDEO) < 0){
+        if(SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0){
             ENGINE_ERROR_PRINTF("Failed to initialize the SDL2 library");
-            mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("SDL Video Init Error"));
+            mp_raise_msg(&mp_type_RuntimeError, MP_ERROR_TEXT("SDL Video/Audio Init Error"));
         }
 
         window = SDL_CreateWindow("Engine Window",
