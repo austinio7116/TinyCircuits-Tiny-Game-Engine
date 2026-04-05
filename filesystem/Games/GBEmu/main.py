@@ -179,12 +179,13 @@ def rom_browser(roms):
                 return None
 
 # --- Pause Menu ---
-def pause_menu(rom_filename, current_palette, audio_on):
+def pause_menu(rom_filename, current_palette, audio_on, fps_on):
     has_state = has_save_state(rom_filename)
     options = [
         "Resume",
         "Palette: " + PALETTE_NAMES[current_palette],
         "Audio: " + ("On" if audio_on else "Off"),
+        "FPS: " + ("On" if fps_on else "Off"),
         "Save State",
         "Load State" + ("" if has_state else " (none)"),
         "Reset",
@@ -194,12 +195,12 @@ def pause_menu(rom_filename, current_palette, audio_on):
 
     cam = CameraNode()
 
-    menu_h = 110
+    menu_h = 120
     bg = Rectangle2DNode(width=110, height=menu_h, color=Color(0, 0, 0), position=Vector2(0, 0))
     bg.opacity = 0.85
     cam.add_child(bg)
 
-    border = Rectangle2DNode(width=110, height=menu_h, color=Color(1, 1, 1), outline=True, position=Vector2(0, 0))
+    border = Rectangle2DNode(width=110, height=120, color=Color(1, 1, 1), outline=True, position=Vector2(0, 0))
     cam.add_child(border)
 
     title = Text2DNode(text="PAUSED", position=Vector2(0, -42))
@@ -214,6 +215,7 @@ def pause_menu(rom_filename, current_palette, audio_on):
     def refresh():
         options[1] = "Palette: " + PALETTE_NAMES[current_palette]
         options[2] = "Audio: " + ("On" if audio_on else "Off")
+        options[3] = "FPS: " + ("On" if fps_on else "Off")
         for i, opt in enumerate(options):
             prefix = "> " if i == cursor else "  "
             items[i].text = prefix + opt
@@ -249,26 +251,31 @@ def pause_menu(rom_filename, current_palette, audio_on):
                     gb_emu.set_audio_enabled(audio_on)
                     refresh()
                     continue
-                elif cursor == 3:  # Save State
-                    if save_state(rom_filename):
-                        items[3].text = "> State Saved!"
-                    else:
-                        items[3].text = "> Save Failed!"
+                elif cursor == 3:  # FPS
+                    fps_on = not fps_on
+                    gb_emu.set_show_fps(fps_on)
+                    refresh()
                     continue
-                elif cursor == 4:  # Load State
+                elif cursor == 4:  # Save State
+                    if save_state(rom_filename):
+                        items[4].text = "> State Saved!"
+                    else:
+                        items[4].text = "> Save Failed!"
+                    continue
+                elif cursor == 5:  # Load State
                     if load_state(rom_filename):
                         result = "resume"
                     else:
-                        items[4].text = "> No State Found"
+                        items[5].text = "> No State Found"
                         continue
-                elif cursor == 5:  # Reset
+                elif cursor == 6:  # Reset
                     result = "reset"
-                elif cursor == 6:  # Quit
+                elif cursor == 7:  # Quit
                     result = "quit"
 
                 cam.mark_destroy_children()
                 cam.mark_destroy()
-                return result, current_palette, audio_on
+                return result, current_palette, audio_on, fps_on
 
 # --- Main ---
 roms = find_roms()
@@ -292,65 +299,24 @@ else:
     cam = CameraNode()
 
     audio_on = True
+    fps_on = False
     running = True
     while running:
-        if engine.tick():
-            # Hold LB + d-pad to pan the viewport
-            if engine_io.LB.is_pressed:
-                cx, cy = gb_emu.get_crop()
-                if engine_io.LEFT.is_pressed:
-                    cx -= PAN_SPEED
-                if engine_io.RIGHT.is_pressed:
-                    cx += PAN_SPEED
-                if engine_io.UP.is_pressed:
-                    cy -= PAN_SPEED
-                if engine_io.DOWN.is_pressed:
-                    cy += PAN_SPEED
-                gb_emu.set_crop(cx, cy)
-                # Don't send d-pad to GB while panning
-                buttons = 0
-                if engine_io.A.is_pressed:
-                    buttons |= gb_emu.BTN_A
-                if engine_io.B.is_pressed:
-                    buttons |= gb_emu.BTN_B
-                if engine_io.RB.is_pressed:
-                    buttons |= gb_emu.BTN_START
-                gb_emu.set_buttons(buttons)
-            else:
-                # Normal input
-                buttons = 0
-                if engine_io.A.is_pressed:
-                    buttons |= gb_emu.BTN_A
-                if engine_io.B.is_pressed:
-                    buttons |= gb_emu.BTN_B
-                if engine_io.LB.is_pressed:
-                    buttons |= gb_emu.BTN_SELECT
-                if engine_io.RB.is_pressed:
-                    buttons |= gb_emu.BTN_START
-                if engine_io.UP.is_pressed:
-                    buttons |= gb_emu.BTN_UP
-                if engine_io.DOWN.is_pressed:
-                    buttons |= gb_emu.BTN_DOWN
-                if engine_io.LEFT.is_pressed:
-                    buttons |= gb_emu.BTN_LEFT
-                if engine_io.RIGHT.is_pressed:
-                    buttons |= gb_emu.BTN_RIGHT
-                gb_emu.set_buttons(buttons)
+        # Run emulation entirely in C until MENU is pressed
+        gb_emu.run_loop()
 
-            gb_emu.run_frame()
+        # MENU was pressed — show pause menu
+        cam.mark_destroy()
+        result, current_palette, audio_on, fps_on = pause_menu(selected, current_palette, audio_on, fps_on)
 
-            if engine_io.MENU.is_just_pressed:
-                cam.mark_destroy()
-                result, current_palette, audio_on = pause_menu(selected, current_palette, audio_on)
-
-                if result == "resume":
-                    cam = CameraNode()
-                elif result == "reset":
-                    gb_emu.reset()
-                    cam = CameraNode()
-                elif result == "quit":
-                    save_cart_ram(selected)
-                    running = False
+        if result == "resume":
+            cam = CameraNode()
+        elif result == "reset":
+            gb_emu.reset()
+            cam = CameraNode()
+        elif result == "quit":
+            save_cart_ram(selected)
+            running = False
 
     save_cart_ram(selected)
     engine.end()

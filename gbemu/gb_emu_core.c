@@ -6,6 +6,7 @@
 #include "py/obj.h"
 #include "py/runtime.h"
 #include "py/stream.h"
+#include "io/engine_io_buttons.h"
 
 /* Engine's active framebuffer — defined in engine_display_common.c */
 extern uint16_t *active_screen_buffer;
@@ -258,14 +259,23 @@ void gb_emu_run_frame(void) {
 }
 
 /* Called by engine's audio callback at 22050Hz */
+static float last_audio_sample = 0.0f;
+
 float gb_emu_get_audio_sample(void) {
-    if (!audio_enabled || audio_ring_read == audio_ring_write)
+    if (!audio_enabled)
         return 0.0f;
+
+    if (audio_ring_read == audio_ring_write) {
+        /* Buffer underrun: hold last sample to avoid clicks */
+        last_audio_sample *= 0.998f;  /* gentle fade to avoid DC offset */
+        return last_audio_sample;
+    }
 
     int16_t sample = audio_ring[audio_ring_read];
     audio_ring_read = (audio_ring_read + 1) & (GB_AUDIO_RING_SIZE - 1);
 
-    return (float)sample / 32767.0f;
+    last_audio_sample = (float)sample / 32767.0f;
+    return last_audio_sample;
 }
 
 void gb_emu_set_audio_enabled(int enabled) {
@@ -291,6 +301,118 @@ int gb_emu_get_crop_y(void) { return crop_y; }
 void gb_emu_set_buttons(uint8_t buttons) {
     if (initialized)
         gb.direct.joypad = ~buttons;
+}
+
+static int show_fps = 0;
+
+void gb_emu_set_show_fps(int show) { show_fps = show; }
+
+/* Tiny 3x5 font for FPS display — digits 0-9 */
+static const uint8_t digit_font[10][5] = {
+    {0x7,0x5,0x5,0x5,0x7}, /* 0 */
+    {0x2,0x6,0x2,0x2,0x7}, /* 1 */
+    {0x7,0x1,0x7,0x4,0x7}, /* 2 */
+    {0x7,0x1,0x7,0x1,0x7}, /* 3 */
+    {0x5,0x5,0x7,0x1,0x1}, /* 4 */
+    {0x7,0x4,0x7,0x1,0x7}, /* 5 */
+    {0x7,0x4,0x7,0x5,0x7}, /* 6 */
+    {0x7,0x1,0x1,0x1,0x1}, /* 7 */
+    {0x7,0x5,0x7,0x5,0x7}, /* 8 */
+    {0x7,0x5,0x7,0x1,0x7}, /* 9 */
+};
+
+static void draw_fps(int fps) {
+    if (!active_screen_buffer || !show_fps) return;
+    /* Draw up to 3 digits at top-right corner */
+    char buf[4];
+    int len = 0;
+    if (fps >= 100) buf[len++] = (fps / 100) % 10;
+    if (fps >= 10) buf[len++] = (fps / 10) % 10;
+    buf[len++] = fps % 10;
+
+    int start_x = THUMBY_W - len * 4 - 1;
+    for (int d = 0; d < len; d++) {
+        int digit = buf[d];
+        int dx = start_x + d * 4;
+        for (int row = 0; row < 5; row++) {
+            uint8_t bits = digit_font[digit][row];
+            for (int col = 0; col < 3; col++) {
+                if (bits & (4 >> col)) {
+                    active_screen_buffer[(row + 1) * THUMBY_W + dx + col] = 0xFFFF;
+                }
+            }
+        }
+    }
+}
+
+/* High-performance all-C frame loop. Runs until MENU is pressed.
+ * Returns number of frames run. Eliminates Python interpreter overhead. */
+int gb_emu_run_loop(void) {
+    if (!initialized) return 0;
+
+    extern bool engine_tick(void);
+    extern button_class_obj_t BUTTON_A, BUTTON_B;
+    extern button_class_obj_t BUTTON_BUMPER_LEFT, BUTTON_BUMPER_RIGHT;
+    extern button_class_obj_t BUTTON_DPAD_UP, BUTTON_DPAD_DOWN;
+    extern button_class_obj_t BUTTON_DPAD_LEFT, BUTTON_DPAD_RIGHT;
+    extern button_class_obj_t BUTTON_MENU;
+
+    int frames = 0;
+
+    while (1) {
+        if (!engine_tick())
+            continue;
+
+        /* Check MENU for pause — must check before overwriting joypad */
+        if (button_is_just_pressed(&BUTTON_MENU))
+            break;
+
+        /* Read buttons directly from engine_io button objects */
+        uint8_t buttons = 0;
+
+        /* Check if LB is held for viewport panning */
+        if (button_is_pressed(&BUTTON_BUMPER_LEFT)) {
+            if (button_is_pressed(&BUTTON_DPAD_LEFT))  gb_emu_set_crop(crop_x - 2, crop_y);
+            if (button_is_pressed(&BUTTON_DPAD_RIGHT)) gb_emu_set_crop(crop_x + 2, crop_y);
+            if (button_is_pressed(&BUTTON_DPAD_UP))    gb_emu_set_crop(crop_x, crop_y - 2);
+            if (button_is_pressed(&BUTTON_DPAD_DOWN))  gb_emu_set_crop(crop_x, crop_y + 2);
+            /* Only pass A, B, RB to GB while panning */
+            if (button_is_pressed(&BUTTON_A)) buttons |= JOYPAD_A;
+            if (button_is_pressed(&BUTTON_B)) buttons |= JOYPAD_B;
+            if (button_is_pressed(&BUTTON_BUMPER_RIGHT)) buttons |= JOYPAD_START;
+        } else {
+            if (button_is_pressed(&BUTTON_A)) buttons |= JOYPAD_A;
+            if (button_is_pressed(&BUTTON_B)) buttons |= JOYPAD_B;
+            if (button_is_pressed(&BUTTON_BUMPER_LEFT))  buttons |= JOYPAD_SELECT;
+            if (button_is_pressed(&BUTTON_BUMPER_RIGHT)) buttons |= JOYPAD_START;
+            if (button_is_pressed(&BUTTON_DPAD_UP))    buttons |= JOYPAD_UP;
+            if (button_is_pressed(&BUTTON_DPAD_DOWN))  buttons |= JOYPAD_DOWN;
+            if (button_is_pressed(&BUTTON_DPAD_LEFT))  buttons |= JOYPAD_LEFT;
+            if (button_is_pressed(&BUTTON_DPAD_RIGHT)) buttons |= JOYPAD_RIGHT;
+        }
+
+        gb.direct.joypad = ~buttons;
+        gb_emu_run_frame();
+
+        /* Draw FPS overlay after GB frame renders */
+        if (show_fps) {
+            extern uint32_t engine_fps_time_at_last_tick_ms;
+            extern uint32_t engine_fps_time_at_before_last_tick_ms;
+            if (engine_fps_time_at_before_last_tick_ms != 0xFFFFFFFF) {
+                uint32_t dt = engine_fps_time_at_last_tick_ms - engine_fps_time_at_before_last_tick_ms;
+                if (dt > 0) draw_fps(1000 / dt);
+            }
+        }
+
+        frames++;
+
+        /* Handle MicroPython interrupts (Ctrl-C etc) */
+        mp_handle_pending(false);
+        if (MP_STATE_THREAD(mp_pending_exception) != MP_OBJ_NULL)
+            break;
+    }
+
+    return frames;
 }
 
 void gb_emu_reset(void) {

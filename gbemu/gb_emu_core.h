@@ -83,6 +83,12 @@ void gb_emu_set_crop(int x, int y);
 int gb_emu_get_crop_x(void);
 int gb_emu_get_crop_y(void);
 
+/* Run emulation loop entirely in C until MENU pressed. Returns frame count. */
+int gb_emu_run_loop(void);
+
+/* Show/hide FPS counter overlay */
+void gb_emu_set_show_fps(int show);
+
 /* Save states: snapshot/restore full emulator state */
 size_t gb_emu_get_state_size(void);
 int gb_emu_save_state(uint8_t *buf, size_t buf_size);

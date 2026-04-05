@@ -111,6 +111,21 @@ static mp_obj_t gb_emu_mp_get_save_size(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_get_save_size_obj, gb_emu_mp_get_save_size);
 
+/* gb_emu.set_show_fps(bool) -> None */
+static mp_obj_t gb_emu_mp_set_show_fps(mp_obj_t show_obj) {
+    gb_emu_set_show_fps(mp_obj_is_true(show_obj) ? 1 : 0);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_set_show_fps_obj, gb_emu_mp_set_show_fps);
+
+/* gb_emu.run_loop() -> int (frame count)
+ * High-performance all-C frame loop. Runs until MENU pressed. */
+static mp_obj_t gb_emu_mp_run_loop(void) {
+    int frames = gb_emu_run_loop();
+    return mp_obj_new_int(frames);
+}
+MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_run_loop_obj, gb_emu_mp_run_loop);
+
 /* gb_emu.set_audio_enabled(bool) -> None */
 static mp_obj_t gb_emu_mp_set_audio_enabled(mp_obj_t enabled_obj) {
     gb_emu_set_audio_enabled(mp_obj_is_true(enabled_obj) ? 1 : 0);
@@ -173,6 +188,8 @@ static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_cart_ram),    MP_ROM_PTR(&gb_emu_mp_get_cart_ram_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_cart_ram),    MP_ROM_PTR(&gb_emu_mp_set_cart_ram_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_save_size),   MP_ROM_PTR(&gb_emu_mp_get_save_size_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_run_loop),          MP_ROM_PTR(&gb_emu_mp_run_loop_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_set_show_fps),    MP_ROM_PTR(&gb_emu_mp_set_show_fps_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_audio_enabled), MP_ROM_PTR(&gb_emu_mp_set_audio_enabled_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_crop),        MP_ROM_PTR(&gb_emu_mp_set_crop_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_crop),        MP_ROM_PTR(&gb_emu_mp_get_crop_obj) },
