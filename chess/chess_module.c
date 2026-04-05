@@ -1,6 +1,6 @@
 /*
  * chess_engine MicroPython C module
- * Wraps mcu-max chess engine for Thumby Color
+ * Wraps Chal chess engine for Thumby Color
  *
  * License: MIT
  */
@@ -10,172 +10,176 @@
 #include "py/objarray.h"
 #include "py/gc.h"
 #include <string.h>
+#include "chal.h"
 #include "mcu-max.h"
 #include "chess_game.h"
 
-/* Hash table buffer — allocated from MicroPython GC heap */
-#ifndef MCUMAX_HASH_TABLE_SIZE
-#define MCUMAX_HASH_TABLE_SIZE 4096
-#endif
-static uint8_t *hash_table_buf = NULL;
-static size_t hash_table_buf_size = 0;
+/* Buffers — allocated from MicroPython GC heap on demand */
+#define CHAL_TT_COUNT 2048
+#define MCUMAX_TT_COUNT 4096
 
-static void chess_alloc_hash_table(void) {
-    if (hash_table_buf != NULL) return;  /* already allocated */
+/* Chal buffers */
+static uint8_t *chal_tt_buf = NULL;
+static size_t chal_tt_buf_size = 0;
+static uint8_t *chal_dyn_buf = NULL;
+static size_t chal_dyn_buf_size = 0;
+
+/* mcu-max buffer */
+static uint8_t *mcumax_tt_buf = NULL;
+static size_t mcumax_tt_buf_size = 0;
+
+/* Allocate only the selected engine to stay within memory budget */
+static void chess_alloc_chal(void) {
+    if (chal_dyn_buf != NULL) return;
+    chal_dyn_buf_size = chal_get_dynamic_size();
+    chal_dyn_buf = m_new(uint8_t, chal_dyn_buf_size);
+    memset(chal_dyn_buf, 0, chal_dyn_buf_size);
+    chal_set_dynamic_buffer(chal_dyn_buf);
+
+    int entry_size = chal_get_tt_entry_size();
+    chal_tt_buf_size = CHAL_TT_COUNT * entry_size;
+    chal_tt_buf = m_new(uint8_t, chal_tt_buf_size);
+    memset(chal_tt_buf, 0, chal_tt_buf_size);
+    chal_set_tt(chal_tt_buf, CHAL_TT_COUNT);
+    chal_init();
+}
+
+static void chess_alloc_mcumax(void) {
+    if (mcumax_tt_buf != NULL) return;
     uint32_t entry_size = mcumax_get_hash_table_entry_size();
-    hash_table_buf_size = MCUMAX_HASH_TABLE_SIZE * entry_size;
-    hash_table_buf = m_new(uint8_t, hash_table_buf_size);
-    memset(hash_table_buf, 0, hash_table_buf_size);
-    mcumax_set_hash_table(hash_table_buf);
+    mcumax_tt_buf_size = MCUMAX_TT_COUNT * entry_size;
+    mcumax_tt_buf = m_new(uint8_t, mcumax_tt_buf_size);
+    memset(mcumax_tt_buf, 0, mcumax_tt_buf_size);
+    mcumax_set_hash_table(mcumax_tt_buf);
 }
 
-static void chess_free_hash_table(void) {
-    if (hash_table_buf == NULL) return;
-    mcumax_deinit();  /* clear the pointer in mcu-max */
-    m_del(uint8_t, hash_table_buf, hash_table_buf_size);
-    hash_table_buf = NULL;
-    hash_table_buf_size = 0;
+/* Called from chess_game.c when user selects an engine and starts a game */
+void chess_alloc_engine(int engine) {
+    if (engine == 0) {  /* ENGINE_CHAL */
+        chess_alloc_chal();
+    } else {            /* ENGINE_MCUMAX */
+        chess_alloc_mcumax();
+    }
 }
 
-/* chess_engine.init() -> None
- * Initialize engine with starting position. */
+static void chess_free(void) {
+    chal_deinit();
+    mcumax_deinit();
+    if (chal_tt_buf != NULL) { m_del(uint8_t, chal_tt_buf, chal_tt_buf_size); chal_tt_buf = NULL; }
+    if (chal_dyn_buf != NULL) { m_del(uint8_t, chal_dyn_buf, chal_dyn_buf_size); chal_dyn_buf = NULL; }
+    if (mcumax_tt_buf != NULL) { m_del(uint8_t, mcumax_tt_buf, mcumax_tt_buf_size); mcumax_tt_buf = NULL; }
+}
+
+/* chess_engine.init() -> None */
 static mp_obj_t chess_mp_init(void) {
-    chess_alloc_hash_table();
-    mcumax_init();
+    chess_alloc_chal();
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_init_obj, chess_mp_init);
 
-/* chess_engine.deinit() -> None
- * Free dynamically allocated memory (hash table). */
+/* chess_engine.deinit() -> None */
 static mp_obj_t chess_mp_deinit(void) {
-    chess_free_hash_table();
+    chess_free();
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_deinit_obj, chess_mp_deinit);
 
-/* chess_engine.new_game() -> None
- * Reset to starting position. */
+/* chess_engine.new_game() -> None */
 static mp_obj_t chess_mp_new_game(void) {
-    mcumax_init();
+    chess_alloc_chal();
+    chal_new_game();
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_new_game_obj, chess_mp_new_game);
 
-/* chess_engine.set_fen(fen_string) -> None
- * Load position from FEN string. */
+/* chess_engine.set_fen(fen_string) -> None */
 static mp_obj_t chess_mp_set_fen(mp_obj_t fen_obj) {
     const char *fen = mp_obj_str_get_str(fen_obj);
-    mcumax_set_fen_position(fen);
+    chal_set_fen(fen);
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_1(chess_mp_set_fen_obj, chess_mp_set_fen);
 
-/* chess_engine.get_piece(square) -> int
- * Get piece at square (0xRF format: rank<<4 | file).
- * Returns piece code (0=empty, bits 0-2=type, bit 3=black). */
-static mp_obj_t chess_mp_get_piece(mp_obj_t sq_obj) {
-    uint8_t sq = (uint8_t)mp_obj_get_int(sq_obj);
-    return mp_obj_new_int(mcumax_get_piece(sq));
+/* chess_engine.get_piece(rank, file) -> int */
+static mp_obj_t chess_mp_get_piece(mp_obj_t rank_obj, mp_obj_t file_obj) {
+    int rank = mp_obj_get_int(rank_obj);
+    int file = mp_obj_get_int(file_obj);
+    return mp_obj_new_int(chal_get_piece(rank, file));
 }
-MP_DEFINE_CONST_FUN_OBJ_1(chess_mp_get_piece_obj, chess_mp_get_piece);
+MP_DEFINE_CONST_FUN_OBJ_2(chess_mp_get_piece_obj, chess_mp_get_piece);
 
-/* chess_engine.get_side() -> int
- * Returns current side to move (WHITE=0x8, BLACK=0x10). */
+/* chess_engine.get_side() -> int (0=white, 1=black) */
 static mp_obj_t chess_mp_get_side(void) {
-    return mp_obj_new_int(mcumax_get_current_side());
+    return mp_obj_new_int(chal_get_side());
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_get_side_obj, chess_mp_get_side);
 
-/* chess_engine.get_legal_moves() -> list of (from, to) tuples
- * Returns all legal moves for current side. */
+/* chess_engine.get_legal_moves() -> list of (from, to, promo) tuples */
 static mp_obj_t chess_mp_get_legal_moves(void) {
-    mcumax_move moves[181];
-    uint32_t count = mcumax_search_valid_moves(moves, 181);
+    chal_move_info_t moves[256];
+    int count = chal_get_legal_moves(moves, 256);
 
     mp_obj_t list = mp_obj_new_list(0, NULL);
-    for (uint32_t i = 0; i < count; i++) {
-        mp_obj_t tuple[2] = {
+    for (int i = 0; i < count; i++) {
+        mp_obj_t tuple[3] = {
             mp_obj_new_int(moves[i].from),
             mp_obj_new_int(moves[i].to),
+            mp_obj_new_int(moves[i].promo),
         };
-        mp_obj_list_append(list, mp_obj_new_tuple(2, tuple));
+        mp_obj_list_append(list, mp_obj_new_tuple(3, tuple));
     }
     return list;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_get_legal_moves_obj, chess_mp_get_legal_moves);
 
-/* chess_engine.make_move(from_sq, to_sq) -> bool
- * Play a move. Returns True if legal. */
-static mp_obj_t chess_mp_make_move(mp_obj_t from_obj, mp_obj_t to_obj) {
-    mcumax_move move = {
-        .from = (uint8_t)mp_obj_get_int(from_obj),
-        .to = (uint8_t)mp_obj_get_int(to_obj),
-    };
-    bool ok = mcumax_play_move(move);
-    return mp_obj_new_bool(ok);
+/* chess_engine.make_move(from_sq, to_sq, promo) -> bool */
+static mp_obj_t chess_mp_make_move(size_t n_args, const mp_obj_t *args) {
+    int from = mp_obj_get_int(args[0]);
+    int to = mp_obj_get_int(args[1]);
+    int promo = (n_args >= 3) ? mp_obj_get_int(args[2]) : 0;
+    return mp_obj_new_bool(chal_play_move(from, to, promo));
 }
-MP_DEFINE_CONST_FUN_OBJ_2(chess_mp_make_move_obj, chess_mp_make_move);
+MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(chess_mp_make_move_obj, 2, 3, chess_mp_make_move);
 
-/* chess_engine.get_ai_move(node_limit, depth_limit) -> (from, to) or None
- * Search for best move. Blocking call.
- * node_limit: max nodes to search (0 = unlimited)
- * depth_limit: max search depth */
+/* chess_engine.get_ai_move(depth, time_ms) -> (from, to, promo) or None */
 static mp_obj_t chess_mp_get_ai_move(size_t n_args, const mp_obj_t *args) {
-    uint32_t node_limit = 100000;
-    uint32_t depth_limit = 6;
+    int depth = (n_args >= 1) ? mp_obj_get_int(args[0]) : 4;
+    int time_ms = (n_args >= 2) ? mp_obj_get_int(args[1]) : 0;
 
-    if (n_args >= 1) {
-        node_limit = (uint32_t)mp_obj_get_int(args[0]);
-    }
-    if (n_args >= 2) {
-        depth_limit = (uint32_t)mp_obj_get_int(args[1]);
-    }
+    chal_move_info_t best = chal_search_best_move(depth, time_ms);
+    if (best.from == 0x80) return mp_const_none;
 
-    mcumax_move best = mcumax_search_best_move(node_limit, depth_limit);
-
-    if (best.from == MCUMAX_SQUARE_INVALID) {
-        return mp_const_none;
-    }
-
-    mp_obj_t tuple[2] = {
+    mp_obj_t tuple[3] = {
         mp_obj_new_int(best.from),
         mp_obj_new_int(best.to),
+        mp_obj_new_int(best.promo),
     };
-    return mp_obj_new_tuple(2, tuple);
+    return mp_obj_new_tuple(3, tuple);
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(chess_mp_get_ai_move_obj, 0, 2, chess_mp_get_ai_move);
 
-/* chess_engine.get_board() -> list of 64 ints
- * Returns board state as 64 piece codes, a1-h1 then a2-h2 etc.
- * Each value: 0=empty, or piece type | color bit. */
+/* chess_engine.get_board() -> list of 64 ints */
 static mp_obj_t chess_mp_get_board(void) {
     mp_obj_t items[64];
     for (int rank = 0; rank < 8; rank++) {
         for (int file = 0; file < 8; file++) {
-            mcumax_square sq = (rank << 4) | file;
-            items[rank * 8 + file] = mp_obj_new_int(mcumax_get_piece(sq));
+            items[rank * 8 + file] = mp_obj_new_int(chal_get_piece(rank, file));
         }
     }
     return mp_obj_new_list(64, items);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_get_board_obj, chess_mp_get_board);
 
-/* chess_engine.is_game_over() -> int
- * Returns 0 if game continues, 1 if current side has no legal moves.
- * (Checkmate or stalemate — caller must check context.) */
+/* chess_engine.is_game_over() -> int (0=no, 1=checkmate, 2=stalemate) */
 static mp_obj_t chess_mp_is_game_over(void) {
-    mcumax_move moves[1];
-    uint32_t count = mcumax_search_valid_moves(moves, 1);
-    return mp_obj_new_int(count == 0 ? 1 : 0);
+    if (chal_is_checkmate()) return mp_obj_new_int(1);
+    if (chal_is_stalemate()) return mp_obj_new_int(2);
+    return mp_obj_new_int(0);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(chess_mp_is_game_over_obj, chess_mp_is_game_over);
 
-/* chess_engine.run_loop(sprite_texture, board_texture) -> int
- * Run the all-C game loop. Textures are TextureResource objects.
- * Returns frame count when MENU is pressed. */
+/* chess_engine.run_loop(sprite_texture, board_texture) -> int */
 static mp_obj_t chess_mp_run_loop(size_t n_args, const mp_obj_t *args) {
-    /* Get sprite texture data buffer */
     mp_obj_t sprite_tex = args[0];
     mp_obj_t sprite_data_attr = mp_load_attr(sprite_tex, MP_QSTR_data);
     mp_buffer_info_t sprite_buf;
@@ -183,7 +187,6 @@ static mp_obj_t chess_mp_run_loop(size_t n_args, const mp_obj_t *args) {
     int sprite_w = mp_obj_get_int(mp_load_attr(sprite_tex, MP_QSTR_width));
     int sprite_h = mp_obj_get_int(mp_load_attr(sprite_tex, MP_QSTR_height));
 
-    /* Get board texture data buffer */
     mp_obj_t board_tex = args[1];
     mp_obj_t board_data_attr = mp_load_attr(board_tex, MP_QSTR_data);
     mp_buffer_info_t board_buf;
@@ -191,14 +194,12 @@ static mp_obj_t chess_mp_run_loop(size_t n_args, const mp_obj_t *args) {
     int board_w = mp_obj_get_int(mp_load_attr(board_tex, MP_QSTR_width));
     int board_h = mp_obj_get_int(mp_load_attr(board_tex, MP_QSTR_height));
 
-    /* Allocate hash table before any engine calls */
-    chess_alloc_hash_table();
+    /* Engine allocation happens lazily in chess_game.c via chess_alloc_engine() */
 
     chess_game_init((uint16_t *)sprite_buf.buf, sprite_w, sprite_h,
                     (uint16_t *)board_buf.buf, board_w, board_h);
     int frames = chess_game_run_loop();
-    /* Free hash table memory when leaving chess */
-    mcumax_deinit();
+    chess_free();
     return mp_obj_new_int(frames);
 }
 MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(chess_mp_run_loop_obj, 2, 2, chess_mp_run_loop);
@@ -217,18 +218,18 @@ static const mp_rom_map_elem_t chess_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_ai_move),     MP_ROM_PTR(&chess_mp_get_ai_move_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_board),       MP_ROM_PTR(&chess_mp_get_board_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_is_game_over),    MP_ROM_PTR(&chess_mp_is_game_over_obj) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_run_loop),       MP_ROM_PTR(&chess_mp_run_loop_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_run_loop),        MP_ROM_PTR(&chess_mp_run_loop_obj) },
     /* Piece type constants */
-    { MP_OBJ_NEW_QSTR(MP_QSTR_EMPTY),           MP_OBJ_NEW_SMALL_INT(MCUMAX_EMPTY) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_PAWN),            MP_OBJ_NEW_SMALL_INT(MCUMAX_PAWN_UPSTREAM) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_KNIGHT),          MP_OBJ_NEW_SMALL_INT(MCUMAX_KNIGHT) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_BISHOP),          MP_OBJ_NEW_SMALL_INT(MCUMAX_BISHOP) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_ROOK),            MP_OBJ_NEW_SMALL_INT(MCUMAX_ROOK) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_QUEEN),           MP_OBJ_NEW_SMALL_INT(MCUMAX_QUEEN) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_KING),            MP_OBJ_NEW_SMALL_INT(MCUMAX_KING) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_EMPTY),           MP_OBJ_NEW_SMALL_INT(CHAL_EMPTY) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_PAWN),            MP_OBJ_NEW_SMALL_INT(CHAL_PAWN) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_KNIGHT),          MP_OBJ_NEW_SMALL_INT(CHAL_KNIGHT) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_BISHOP),          MP_OBJ_NEW_SMALL_INT(CHAL_BISHOP) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_ROOK),            MP_OBJ_NEW_SMALL_INT(CHAL_ROOK) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_QUEEN),           MP_OBJ_NEW_SMALL_INT(CHAL_QUEEN) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_KING),            MP_OBJ_NEW_SMALL_INT(CHAL_KING) },
     /* Side constants */
-    { MP_OBJ_NEW_QSTR(MP_QSTR_WHITE),           MP_OBJ_NEW_SMALL_INT(0x8) },
-    { MP_OBJ_NEW_QSTR(MP_QSTR_BLACK),           MP_OBJ_NEW_SMALL_INT(0x10) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_WHITE),           MP_OBJ_NEW_SMALL_INT(CHAL_WHITE) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_BLACK),           MP_OBJ_NEW_SMALL_INT(CHAL_BLACK) },
 };
 
 static MP_DEFINE_CONST_DICT(mp_module_chess_globals, chess_globals_table);

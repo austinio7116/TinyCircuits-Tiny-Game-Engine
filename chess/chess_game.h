@@ -16,4 +16,9 @@ void chess_game_init(uint16_t *sprite_data, int sprite_w, int sprite_h,
 /* Run the all-C game loop. Returns when MENU is pressed. */
 int chess_game_run_loop(void);
 
+/* Called from chess_game.c when user selects an engine.
+ * Allocates memory for the selected engine only.
+ * engine: 0 = CHAL, 1 = MCU-MAX */
+extern void chess_alloc_engine(int engine);
+
 #endif

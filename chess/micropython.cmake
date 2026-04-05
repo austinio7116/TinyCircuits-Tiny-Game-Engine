@@ -4,6 +4,7 @@ target_sources(usermod_chess INTERFACE
     ${CMAKE_CURRENT_LIST_DIR}/chess_module.c
     ${CMAKE_CURRENT_LIST_DIR}/chess_game.c
     ${CMAKE_CURRENT_LIST_DIR}/mcu-max.c
+    ${CMAKE_CURRENT_LIST_DIR}/chal.c
 )
 
 target_include_directories(usermod_chess INTERFACE

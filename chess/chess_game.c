@@ -2,95 +2,35 @@
  * chess_game.c — All-C game loop for DeepThumb chess
  *
  * Renders directly to the engine's framebuffer, polls buttons,
- * and drives the mcu-max chess engine for AI moves.
+ * and drives the Chal chess engine for AI moves.
  */
 
 #include "chess_game.h"
+#include "chal.h"
 #include "mcu-max.h"
 #include "py/obj.h"
 #include "py/runtime.h"
 #include "io/engine_io_buttons.h"
 #include <string.h>
 
-/* Dual-core support: RP2350 only */
-#if defined(__arm__)
-#define CHESS_DUAL_CORE 1
-#include "pico/multicore.h"
-#include "pico/time.h"
-#else
-#define CHESS_DUAL_CORE 0
-#endif
+/* Engine types */
+#define ENGINE_CHAL   0
+#define ENGINE_MCUMAX 1
+static const char *engine_names[] = { "CHAL", "MCU-MAX" };
 
-/* ---- Dual-core AI search ---- */
+/* Difficulty settings per engine */
+static const uint32_t chal_depth[] = { 2, 4, 6, 64 };
+static const uint32_t chal_time[]  = { 500, 1500, 3000, 8000 };
+static const char *chal_elo[]      = { "~1200", "~1600", "~1900", "~2200" };
+static const uint32_t mcumax_nodes[] = { 5000, 20000, 100000, 500000 };
+static const uint32_t mcumax_depth[] = { 3, 4, 5, 6 };
+static const char *mcumax_elo[]      = { "~1000", "~1400", "~1700", "~1900" };
 
-#define SEARCH_IDLE      0
-#define SEARCH_RUNNING   1
-#define SEARCH_DONE      2
-
-static volatile int search_state = SEARCH_IDLE;
-static volatile uint8_t search_result_from;
-static volatile uint8_t search_result_to;
-static volatile int search_result_valid;  /* 1 = move found, 0 = no moves */
-
-#if CHESS_DUAL_CORE
-/* Search parameters — set by core 0 before launching core 1 */
-static uint32_t search_node_limit;
-static uint32_t search_depth_limit;
-/* Core 1 stack — 8KB for recursive search */
-static uint32_t core1_stack[2048];  /* 8KB */
-static int core1_launched = 0;
-
-static void core1_search_entry(void) {
-    while (1) {
-        /* Wait for search command from core 0 */
-        uint32_t cmd = multicore_fifo_pop_blocking();
-        (void)cmd;
-
-        search_state = SEARCH_RUNNING;
-        mcumax_move best = mcumax_search_best_move(search_node_limit, search_depth_limit);
-
-        if (best.from != MCUMAX_SQUARE_INVALID) {
-            search_result_from = best.from;
-            search_result_to = best.to;
-            search_result_valid = 1;
-        } else {
-            search_result_valid = 0;
-        }
-        search_state = SEARCH_DONE;
-    }
-}
-
-static void launch_core1_if_needed(void) {
-    if (!core1_launched) {
-        multicore_launch_core1_with_stack(core1_search_entry,
-            core1_stack, sizeof(core1_stack));
-        core1_launched = 1;
-    }
-}
-
-static void start_search_async(uint32_t nodes, uint32_t depth) {
-    launch_core1_if_needed();
-    search_node_limit = nodes;
-    search_depth_limit = depth;
-    search_state = SEARCH_RUNNING;
-    multicore_fifo_push_blocking(1);  /* signal core 1 to start */
-}
-#endif /* CHESS_DUAL_CORE */
-
-/* Start search — async on device, blocking on emulator */
-static void start_ai_search(uint32_t nodes, uint32_t depth) {
-#if CHESS_DUAL_CORE
-    start_search_async(nodes, depth);
-#else
-    /* Blocking fallback for unix emulator */
-    search_state = SEARCH_RUNNING;
-    mcumax_move best = mcumax_search_best_move(nodes, depth);
-    search_result_from = best.from;
-    search_result_to = best.to;
-    search_result_valid = (best.from != MCUMAX_SQUARE_INVALID);
-    search_state = SEARCH_DONE;
-#endif
-}
+/* ---- AI search result (filled by blocking search) ---- */
+static uint8_t search_result_from;
+static uint8_t search_result_to;
+static int search_result_valid;
+static uint8_t search_result_promo;
 
 /* Engine framebuffer */
 extern uint16_t *active_screen_buffer;
@@ -152,7 +92,8 @@ static struct {
 
     /* Player/AI setup */
     int player_is_white;    /* 1 = player is white, 0 = player is black */
-    int difficulty;         /* 0=easy(d3), 1=medium(d4), 2=hard(d5), 3=expert(d6) */
+    int difficulty;         /* 0=easy, 1=medium, 2=hard, 3=expert */
+    int engine;             /* ENGINE_CHAL or ENGINE_MCUMAX */
 
     /* Cursor */
     int cursor_file;        /* 0-7 */
@@ -163,7 +104,7 @@ static struct {
     int sel_file, sel_rank;
 
     /* Legal moves for selected piece */
-    mcumax_move legal_moves[181];
+    chal_move_info_t legal_moves[256];
     int legal_move_count;
 
     /* Last move highlight */
@@ -185,15 +126,41 @@ static struct {
     uint16_t *board_data;
     int board_w, board_h;
 
-    /* Board snapshot — used during AI thinking to avoid rendering search internals */
-    uint8_t board_snapshot[64];  /* piece codes, rank-major */
-    int use_snapshot;
+    /* (board snapshot removed — blocking search, no concurrent rendering) */
 } game;
 
-/* Difficulty settings: node limit and depth limit */
-static const uint32_t diff_nodes[] = { 10000, 50000, 200000, 500000 };
-static const uint32_t diff_depth[] = { 3, 4, 5, 6 };
 static const char *diff_names[] = { "Easy", "Medium", "Hard", "Expert" };
+
+/* ---- Engine abstraction wrappers ---- */
+
+static const int mcumax_type_to_chal[] = {
+    0, CHAL_PAWN, CHAL_PAWN, CHAL_KNIGHT, CHAL_KING, CHAL_BISHOP, CHAL_ROOK, CHAL_QUEEN
+};
+
+static int engine_get_piece(int rank, int file) {
+    if (game.engine == ENGINE_CHAL) {
+        return chal_get_piece(rank, file);
+    } else {
+        uint8_t sq = (rank << 4) | file;
+        mcumax_piece raw = mcumax_get_piece(sq);
+        int mtype = raw & 0x7;
+        if (mtype == MCUMAX_EMPTY) return 0;
+        int is_black = (raw & MCUMAX_BLACK) ? 1 : 0;
+        return (is_black << 3) | mcumax_type_to_chal[mtype];
+    }
+}
+
+static int engine_get_side(void) {
+    if (game.engine == ENGINE_CHAL) return chal_get_side();
+    return (mcumax_get_current_side() == 0x8) ? 0 : 1;
+}
+
+static void engine_new_game(void) {
+    if (game.engine == ENGINE_CHAL) chal_new_game();
+    else mcumax_init();
+}
+
+/* engine_stop_search and engine_setup_search removed — single-threaded blocking search */
 
 /* ---- Tiny 4x6 font for status text ---- */
 /* ASCII 32-90 (space through Z), 4 pixels wide, 6 pixels tall */
@@ -368,57 +335,50 @@ static void blit_board_tile(int screen_x, int screen_y, int tile_idx) {
     }
 }
 
-/* Take a snapshot of the current board for rendering during AI search */
-static void take_board_snapshot(void) {
-    for (int rank = 0; rank < 8; rank++) {
-        for (int file = 0; file < 8; file++) {
-            mcumax_square sq = (rank << 4) | file;
-            game.board_snapshot[rank * 8 + file] = mcumax_get_piece(sq);
-        }
-    }
-    game.use_snapshot = 1;
+/* Get piece for rendering — always live board (no snapshot needed with blocking search) */
+static inline uint8_t get_piece_for_render(int file, int rank) {
+    return engine_get_piece(rank, file);
 }
 
-/* Get piece at (file, rank) — uses snapshot if active, otherwise live board */
-static uint8_t get_piece_for_render(int file, int rank) {
-    if (game.use_snapshot) {
-        return game.board_snapshot[rank * 8 + file];
-    }
-    mcumax_square sq = (rank << 4) | file;
-    return mcumax_get_piece(sq);
+/* Convert game coordinates (rank 0 = top = rank 8) to Chal 0x88 square
+ * (rank 0 = rank 1 = white back rank) */
+static inline uint8_t game_to_0x88(int rank, int file) {
+    return (uint8_t)((7 - rank) * 16 + file);
 }
 
-/* Convert mcu-max piece to sprite column index.
- * mcu-max pieces (after get_piece XOR): type in bits 0-2, black in bit 3.
- * Types: 0=empty, 1=pawn_up, 2=pawn_down, 3=knight, 4=king, 5=bishop, 6=rook, 7=queen */
+/* Convert Chal 0x88 square to game rank and file */
+static inline void sq88_to_game(uint8_t sq, int *rank, int *file) {
+    *rank = 7 - (sq >> 4);
+    *file = sq & 7;
+}
+
+/* Convert Chal piece to sprite column index.
+ * Chal pieces: (color<<3)|type. color: 0=white, 1=black. type: 1=pawn..6=king.
+ * Sprite columns: Rook=0, Knight=1, Bishop=2, King=3, Queen=4, Pawn=5 */
 static int piece_to_sprite_col(uint8_t piece) {
     int ptype = piece & 0x7;
     switch (ptype) {
-        case 1: case 2: return SPRITE_PAWN;
-        case 3: return SPRITE_KNIGHT;
-        case 4: return SPRITE_KING;
-        case 5: return SPRITE_BISHOP;
-        case 6: return SPRITE_ROOK;
-        case 7: return SPRITE_QUEEN;
+        case CHAL_PAWN:   return SPRITE_PAWN;
+        case CHAL_KNIGHT: return SPRITE_KNIGHT;
+        case CHAL_BISHOP: return SPRITE_BISHOP;
+        case CHAL_ROOK:   return SPRITE_ROOK;
+        case CHAL_QUEEN:  return SPRITE_QUEEN;
+        case CHAL_KING:   return SPRITE_KING;
         default: return -1;
     }
 }
 
 /* Is a move in the legal moves list for the selected piece? */
 static int is_valid_target(int file, int rank) {
-    mcumax_square to = (rank << 4) | file;
+    uint8_t to = (game.engine == ENGINE_CHAL)
+        ? game_to_0x88(rank, file)
+        : (uint8_t)((rank << 4) | file);
     for (int i = 0; i < game.legal_move_count; i++) {
         if (game.legal_moves[i].to == to)
             return 1;
     }
     return 0;
 }
-
-/* Check if the current side's king is in check.
- * Heuristic: get legal moves. If a capture of the king is possible,
- * we're in check. mcu-max doesn't expose is_check directly.
- * Alternative: check if any opponent piece attacks the king square.
- * Simplest: we just skip check highlighting for now. */
 
 /* ---- Board rendering ---- */
 
@@ -465,8 +425,8 @@ static void draw_board(void) {
 
             /* Valid move dots */
             if (game.selected && is_valid_target(file, rank)) {
-                mcumax_piece p = get_piece_for_render(file, rank);
-                if ((p & 0x7) == MCUMAX_EMPTY) {
+                int p = get_piece_for_render(file, rank);
+                if ((p & 0x7) == CHAL_EMPTY) {
                     /* Empty square: small dot in center */
                     fill_rect(screen_x + 6, screen_y + 6, 4, 4, COLOR_VALID_MOVE);
                 } else {
@@ -479,10 +439,10 @@ static void draw_board(void) {
             }
 
             /* Draw piece */
-            mcumax_piece piece = get_piece_for_render(file, rank);
-            if ((piece & 0x7) != MCUMAX_EMPTY) {
+            int piece = get_piece_for_render(file, rank);
+            if ((piece & 0x7) != CHAL_EMPTY) {
                 int col_idx = piece_to_sprite_col(piece);
-                int is_black = (piece & MCUMAX_BLACK) != 0;
+                int is_black = (piece & (CHAL_BLACK << 3)) != 0;
                 if (col_idx >= 0) {
                     blit_sprite(screen_x, screen_y, col_idx, is_black ? 1 : 0);
                 }
@@ -510,52 +470,87 @@ static void enter_state(game_state_t new_state) {
 }
 
 static int is_player_turn(void) {
-    uint8_t side = mcumax_get_current_side();
-    return (game.player_is_white && side == 0x8) ||
-           (!game.player_is_white && side == 0x10);
+    int side = engine_get_side();
+    return (game.player_is_white && side == 0) ||
+           (!game.player_is_white && side == 1);
 }
 
 static void update_legal_moves_for_selection(void) {
-    /* Get all legal moves, then filter to those from the selected square */
-    mcumax_move all_moves[181];
-    uint32_t total = mcumax_search_valid_moves(all_moves, 181);
-
-    mcumax_square from = (game.sel_rank << 4) | game.sel_file;
     game.legal_move_count = 0;
-    for (uint32_t i = 0; i < total; i++) {
-        if (all_moves[i].from == from) {
-            game.legal_moves[game.legal_move_count++] = all_moves[i];
+
+    if (game.engine == ENGINE_CHAL) {
+        chal_move_info_t all_moves[256];
+        int total = chal_get_legal_moves(all_moves, 256);
+        uint8_t from = game_to_0x88(game.sel_rank, game.sel_file);
+        for (int i = 0; i < total; i++) {
+            if (all_moves[i].from == from)
+                game.legal_moves[game.legal_move_count++] = all_moves[i];
+        }
+    } else {
+        /* mcu-max: convert to chal_move_info_t with game-to-0x88 target mapping */
+        mcumax_move all_moves[181];
+        uint32_t total = mcumax_search_valid_moves(all_moves, 181);
+        uint8_t from_sq = (game.sel_rank << 4) | game.sel_file;
+        for (uint32_t i = 0; i < total; i++) {
+            if (all_moves[i].from == from_sq) {
+                chal_move_info_t m = { all_moves[i].from, all_moves[i].to, 0 };
+                game.legal_moves[game.legal_move_count++] = m;
+            }
         }
     }
 }
 
 static void check_game_end(void) {
-    mcumax_move moves[1];
-    uint32_t count = mcumax_search_valid_moves(moves, 1);
-    if (count == 0) {
-        /* No legal moves: checkmate or stalemate.
-         * mcu-max doesn't distinguish, but if the side has no moves
-         * and is in check it's checkmate, otherwise stalemate.
-         * For simplicity, treat all no-move situations as game over. */
-        game.result = 1;  /* game ended */
-        /* The side that ran out of moves lost (or it's stalemate) */
-        uint8_t side = mcumax_get_current_side();
-        game.winner_is_white = (side == 0x10);  /* black has no moves = white wins */
-        enter_state(STATE_GAME_OVER);
+    if (game.engine == ENGINE_CHAL) {
+        if (chal_is_checkmate()) {
+            game.result = 1;
+            game.winner_is_white = (chal_get_side() == CHAL_BLACK);
+            enter_state(STATE_GAME_OVER);
+        } else if (chal_is_stalemate()) {
+            game.result = 2;
+            game.winner_is_white = -1;
+            enter_state(STATE_GAME_OVER);
+        }
+    } else {
+        mcumax_move moves[1];
+        uint32_t count = mcumax_search_valid_moves(moves, 1);
+        if (count == 0) {
+            game.result = 1;
+            game.winner_is_white = (engine_get_side() == 1);  /* black has no moves = white wins */
+            enter_state(STATE_GAME_OVER);
+        }
     }
 }
 
 static void do_player_select(void) {
-    mcumax_square sq = (game.cursor_rank << 4) | game.cursor_file;
-    mcumax_piece piece = mcumax_get_piece(sq);
+    int piece = engine_get_piece(game.cursor_rank, game.cursor_file);
 
     if (game.selected) {
         /* Check if clicking on a valid target */
         if (is_valid_target(game.cursor_file, game.cursor_rank)) {
-            /* Make the move */
-            mcumax_square from = (game.sel_rank << 4) | game.sel_file;
-            mcumax_square to = sq;
-            bool ok = mcumax_play_move((mcumax_move){from, to});
+            /* Find the matching legal move */
+            uint8_t to;
+            if (game.engine == ENGINE_CHAL)
+                to = game_to_0x88(game.cursor_rank, game.cursor_file);
+            else
+                to = (game.cursor_rank << 4) | game.cursor_file;
+
+            int promo = 0;
+            for (int i = 0; i < game.legal_move_count; i++) {
+                if (game.legal_moves[i].to == to) {
+                    promo = game.legal_moves[i].promo;
+                    break;
+                }
+            }
+
+            bool ok;
+            if (game.engine == ENGINE_CHAL) {
+                uint8_t from = game_to_0x88(game.sel_rank, game.sel_file);
+                ok = chal_play_move(from, to, promo);
+            } else {
+                uint8_t from = (game.sel_rank << 4) | game.sel_file;
+                ok = mcumax_play_move((mcumax_move){from, to});
+            }
             if (ok) {
                 game.has_last_move = 1;
                 game.last_from_file = game.sel_file;
@@ -574,8 +569,8 @@ static void do_player_select(void) {
         }
 
         /* Clicked on own piece: re-select */
-        int player_color_bit = game.player_is_white ? 0 : MCUMAX_BLACK;
-        if ((piece & 0x7) != MCUMAX_EMPTY && (piece & MCUMAX_BLACK) == player_color_bit) {
+        int player_color_bit = game.player_is_white ? 0 : (CHAL_BLACK << 3);
+        if ((piece & 0x7) != CHAL_EMPTY && (piece & (CHAL_BLACK << 3)) == player_color_bit) {
             game.sel_file = game.cursor_file;
             game.sel_rank = game.cursor_rank;
             update_legal_moves_for_selection();
@@ -589,8 +584,8 @@ static void do_player_select(void) {
     }
 
     /* No piece selected: try to select one of ours */
-    int player_color_bit = game.player_is_white ? 0 : MCUMAX_BLACK;
-    if ((piece & 0x7) != MCUMAX_EMPTY && (piece & MCUMAX_BLACK) == player_color_bit) {
+    int player_color_bit = game.player_is_white ? 0 : (CHAL_BLACK << 3);
+    if ((piece & 0x7) != CHAL_EMPTY && (piece & (CHAL_BLACK << 3)) == player_color_bit) {
         game.selected = 1;
         game.sel_file = game.cursor_file;
         game.sel_rank = game.cursor_rank;
@@ -608,11 +603,10 @@ static void draw_board_backdrop(void) {
             int is_dark = (rank + file) % 2;
             blit_board_tile(screen_x, screen_y, is_dark);
 
-            mcumax_square sq = (rank << 4) | file;
-            mcumax_piece piece = mcumax_get_piece(sq);
-            if ((piece & 0x7) != MCUMAX_EMPTY) {
+            int piece = engine_get_piece(rank, file);
+            if ((piece & 0x7) != CHAL_EMPTY) {
                 int col_idx = piece_to_sprite_col(piece);
-                int is_black = (piece & MCUMAX_BLACK) != 0;
+                int is_black = (piece & (CHAL_BLACK << 3)) != 0;
                 if (col_idx >= 0) {
                     blit_sprite(screen_x, screen_y, col_idx, is_black ? 1 : 0);
                 }
@@ -636,7 +630,8 @@ static void darken_screen(void) {
 static void tick_title(void) {
     /* Ensure board is at starting position for the backdrop */
     if (game.think_frame == 0) {
-        mcumax_init();
+        chess_alloc_engine(game.engine);
+        engine_new_game();
         game.think_frame = 1;
     }
 
@@ -670,37 +665,46 @@ static void tick_setup(void) {
     darken_screen();
 
     /* Central panel */
-    fill_rect(8, 12, 112, 104, COLOR_BG);
-    draw_rect_outline(8, 12, 112, 104, COLOR_TEXT_DIM);
+    fill_rect(6, 8, 116, 112, COLOR_BG);
+    draw_rect_outline(6, 8, 116, 112, COLOR_TEXT_DIM);
 
-    draw_text(30, 17, "NEW GAME", COLOR_TEXT_WHITE);
-
-    /* Horizontal line */
-    for (int x = 14; x < 114; x++)
-        active_screen_buffer[27 * SCREEN_W + x] = COLOR_TEXT_DIM;
-
-    /* Color selection — show piece icon */
-    draw_text(15, 34, "SIDE", COLOR_TEXT_DIM);
-    draw_text(50, 34, game.player_is_white ? "WHITE" : "BLACK", COLOR_TEXT_WHITE);
-    /* Draw a small king icon for the selected color */
-    blit_sprite(100, 30, SPRITE_KING, game.player_is_white ? 0 : 1);
-
-    /* Difficulty */
-    draw_text(15, 52, "LEVEL", COLOR_TEXT_DIM);
-    draw_text(50, 52, diff_names[game.difficulty], COLOR_TEXT_WHITE);
+    draw_text(30, 12, "NEW GAME", COLOR_TEXT_WHITE);
 
     /* Separator */
-    for (int x = 14; x < 114; x++)
-        active_screen_buffer[66 * SCREEN_W + x] = COLOR_TEXT_DIM;
+    for (int x = 12; x < 116; x++)
+        active_screen_buffer[21 * SCREEN_W + x] = COLOR_TEXT_DIM;
+
+    /* Engine */
+    draw_text(12, 25, "ENGINE", COLOR_TEXT_DIM);
+    draw_text(55, 25, engine_names[game.engine], COLOR_TEXT_WHITE);
+
+    /* Side — show piece icon */
+    draw_text(12, 35, "SIDE", COLOR_TEXT_DIM);
+    draw_text(55, 35, game.player_is_white ? "WHITE" : "BLACK", COLOR_TEXT_WHITE);
+    blit_sprite(102, 31, SPRITE_KING, game.player_is_white ? 0 : 1);
+
+    /* Difficulty */
+    draw_text(12, 45, "LEVEL", COLOR_TEXT_DIM);
+    draw_text(55, 45, diff_names[game.difficulty], COLOR_TEXT_WHITE);
+
+    /* ELO estimate */
+    const char **elo = (game.engine == ENGINE_CHAL) ? chal_elo : mcumax_elo;
+    draw_text(12, 55, "ELO", COLOR_TEXT_DIM);
+    draw_text(55, 55, elo[game.difficulty], 0x07E0);
+
+    /* Separator */
+    for (int x = 12; x < 116; x++)
+        active_screen_buffer[65 * SCREEN_W + x] = COLOR_TEXT_DIM;
 
     /* Controls */
-    draw_text(15, 72, "UP/DN  LEVEL", COLOR_TEXT_DIM);
-    draw_text(15, 82, "LB/RB  SIDE", COLOR_TEXT_DIM);
+    draw_text(12, 69, "UP/DN  LEVEL", COLOR_TEXT_DIM);
+    draw_text(12, 78, "LT/RT  SIDE", COLOR_TEXT_DIM);
+    draw_text(12, 87, "B      ENGINE", COLOR_TEXT_DIM);
 
     /* Start button */
-    fill_rect(30, 96, 68, 14, 0x2945);
-    draw_rect_outline(30, 96, 68, 14, COLOR_TEXT_WHITE);
-    draw_text(40, 100, "A: PLAY", COLOR_TEXT_WHITE);
+    fill_rect(28, 100, 72, 14, 0x2945);
+    draw_rect_outline(28, 100, 72, 14, COLOR_TEXT_WHITE);
+    draw_text(38, 104, "A: PLAY", COLOR_TEXT_WHITE);
 
     if (button_is_just_pressed(&BUTTON_DPAD_UP)) {
         game.difficulty = (game.difficulty + 1) % 4;
@@ -709,12 +713,18 @@ static void tick_setup(void) {
         game.difficulty = (game.difficulty + 3) % 4;
     }
     if (button_is_just_pressed(&BUTTON_BUMPER_LEFT) ||
-        button_is_just_pressed(&BUTTON_BUMPER_RIGHT)) {
+        button_is_just_pressed(&BUTTON_BUMPER_RIGHT) ||
+        button_is_just_pressed(&BUTTON_DPAD_LEFT) ||
+        button_is_just_pressed(&BUTTON_DPAD_RIGHT)) {
         game.player_is_white = !game.player_is_white;
+    }
+    if (button_is_just_pressed(&BUTTON_B)) {
+        game.engine = (game.engine + 1) % 2;
     }
 
     if (button_is_just_pressed(&BUTTON_A)) {
-        mcumax_init();
+        chess_alloc_engine(game.engine);
+        engine_new_game();
         game.cursor_file = 4;
         game.cursor_rank = game.player_is_white ? 6 : 1;
         game.selected = 0;
@@ -766,54 +776,56 @@ static void tick_player_turn(void) {
 
 static void tick_ai_thinking(void) {
     draw_board();
-
-    /* Animated "thinking" indicator */
-    game.think_frame++;
-    if (game.think_frame % 10 == 0) {
-        game.think_dots = (game.think_dots + 1) % 4;
-    }
-
-    /* Draw thinking text overlay at bottom */
     fill_rect(0, SCREEN_H - 10, SCREEN_W, 10, COLOR_BG);
-    char buf[20] = "THINKING";
-    for (int i = 0; i < game.think_dots; i++) {
-        buf[8 + i] = '.';
-    }
-    buf[8 + game.think_dots] = '\0';
-    draw_text(35, SCREEN_H - 9, buf, COLOR_TEXT_WHITE);
+    draw_text(30, SCREEN_H - 9, "THINKING...", COLOR_TEXT_WHITE);
 
-    /* Frame 1: snapshot the board and launch the search */
-    if (game.think_frame == 1) {
-        take_board_snapshot();  /* freeze board for rendering while search runs */
-        uint32_t nodes = diff_nodes[game.difficulty];
-        uint32_t depth = diff_depth[game.difficulty];
-        start_ai_search(nodes, depth);
+    /* Frame 0: just show the board with the player's move applied.
+     * Frame 1: the display has been refreshed — now do the blocking search. */
+    game.think_frame++;
+    if (game.think_frame < 2) return;
+
+    /* Perform blocking search (screen freezes until done) */
+    if (game.engine == ENGINE_CHAL) {
+        uint32_t depth = chal_depth[game.difficulty];
+        uint32_t time_ms = chal_time[game.difficulty];
+        chal_move_info_t best = chal_search_best_move(depth, time_ms);
+        search_result_from = best.from;
+        search_result_to = best.to;
+        search_result_promo = best.promo;
+        search_result_valid = (best.from != 0x80);
+    } else {
+        uint32_t nodes = mcumax_nodes[game.difficulty];
+        uint32_t depth = mcumax_depth[game.difficulty];
+        mcumax_move best = mcumax_search_best_move(nodes, depth);
+        search_result_from = best.from;
+        search_result_to = best.to;
+        search_result_promo = 0;
+        search_result_valid = (best.from != MCUMAX_SQUARE_INVALID);
     }
 
-    /* Poll for search completion */
-    if (search_state == SEARCH_DONE) {
-        game.use_snapshot = 0;  /* back to live board */
-        if (search_result_valid) {
-            /* Record move for highlight */
-            game.has_last_move = 1;
+    /* Handle result */
+    if (search_result_valid) {
+        game.has_last_move = 1;
+        if (game.engine == ENGINE_CHAL) {
+            sq88_to_game(search_result_from, &game.last_from_rank, &game.last_from_file);
+            sq88_to_game(search_result_to, &game.last_to_rank, &game.last_to_file);
+            chal_play_move(search_result_from, search_result_to, search_result_promo);
+        } else {
             game.last_from_file = search_result_from & 0x7;
             game.last_from_rank = search_result_from >> 4;
             game.last_to_file = search_result_to & 0x7;
             game.last_to_rank = search_result_to >> 4;
-
             mcumax_play_move((mcumax_move){search_result_from, search_result_to});
-
-            check_game_end();
-            if (game.state != STATE_GAME_OVER) {
-                enter_state(STATE_PLAYER_TURN);
-            }
-        } else {
-            /* AI has no moves */
-            game.result = 2;  /* stalemate or mate */
-            game.winner_is_white = game.player_is_white;
-            enter_state(STATE_GAME_OVER);
         }
-        search_state = SEARCH_IDLE;
+
+        check_game_end();
+        if (game.state != STATE_GAME_OVER) {
+            enter_state(STATE_PLAYER_TURN);
+        }
+    } else {
+        game.result = 2;
+        game.winner_is_white = game.player_is_white;
+        enter_state(STATE_GAME_OVER);
     }
 }
 
@@ -868,14 +880,8 @@ int chess_game_run_loop(void) {
         if (!engine_tick())
             continue;
 
-        if (button_is_just_pressed(&BUTTON_MENU)) {
-#if CHESS_DUAL_CORE
-            /* Abort any running search before exiting */
-            if (search_state == SEARCH_RUNNING)
-                mcumax_stop_search();
-#endif
+        if (button_is_just_pressed(&BUTTON_MENU))
             break;
-        }
 
         switch (game.state) {
             case STATE_TITLE:       tick_title(); break;
@@ -892,23 +898,6 @@ int chess_game_run_loop(void) {
         if (MP_STATE_THREAD(mp_pending_exception) != MP_OBJ_NULL)
             break;
     }
-
-#if CHESS_DUAL_CORE
-    /* Stop core 1 when exiting the game loop */
-    if (core1_launched) {
-        /* If a search is still running, abort it */
-        if (search_state == SEARCH_RUNNING) {
-            mcumax_stop_search();
-            /* Wait for it to finish */
-            while (search_state == SEARCH_RUNNING) {
-                tight_loop_contents();
-            }
-        }
-        multicore_reset_core1();
-        core1_launched = 0;
-    }
-#endif
-    search_state = SEARCH_IDLE;
 
     return frames;
 }
