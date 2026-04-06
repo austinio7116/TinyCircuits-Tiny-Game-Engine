@@ -31,6 +31,26 @@
 #include "doomdef.h"
 #include "m_misc.h"
 #include "r_local.h"
+
+#if defined(DOOM_THUMBY) && defined(__arm__)
+/* Column array pool — single contiguous GC heap allocation.
+ * Avoids zone fragmentation from many small PU_STATIC blocks.
+ * Each texture needs width*2 (columnlump) + width*2 (columnofs) = width*4 bytes. */
+static byte *col_pool = NULL;
+static int col_pool_offset = 0;
+static int col_pool_size = 0;
+
+static void *col_pool_alloc(int bytes) {
+    bytes = (bytes + 3) & ~3;  /* align to 4 */
+    if (col_pool && col_pool_offset + bytes <= col_pool_size) {
+        void *p = col_pool + col_pool_offset;
+        col_pool_offset += bytes;
+        return p;
+    }
+    /* Fallback to zone */
+    return Z_Malloc(bytes, PU_STATIC, 0);
+}
+#endif
 #include "p_local.h"
 
 #include "doomstat.h"
@@ -314,8 +334,13 @@ void R_GenerateLookup (int texnum)
 
     /* Lazy allocation — arrays may not exist yet on device */
     if (texturecolumnlump[texnum] == NULL) {
+#if defined(DOOM_THUMBY) && defined(__arm__)
+        texturecolumnlump[texnum] = col_pool_alloc(texture->width * sizeof(short));
+        texturecolumnofs[texnum] = col_pool_alloc(texture->width * sizeof(unsigned short));
+#else
         texturecolumnlump[texnum] = Z_Malloc(texture->width * sizeof(short), PU_STATIC, 0);
         texturecolumnofs[texnum] = Z_Malloc(texture->width * sizeof(unsigned short), PU_STATIC, 0);
+#endif
     }
     collump = texturecolumnlump[texnum];
     colofs = texturecolumnofs[texnum];
@@ -569,8 +594,41 @@ void R_InitTextures (void)
     textureheight = Z_Malloc (numtextures * sizeof(*textureheight), PU_STATIC, 0);
 #endif
 
+#if defined(DOOM_THUMBY) && defined(__arm__)
+    /* Pre-calculate total column pool size from all texture widths */
+    {
+        int total_col_bytes = 0;
+        int *dir_tmp = (int *)(maptex1 + 1);
+        for (i = 0; i < numtextures; i++) {
+            int *mdir;
+            byte *mtbase;
+            if (i < numtextures1) {
+                mtbase = (byte *)maptex1;
+                mdir = (int *)(maptex1 + 1);
+            } else {
+                mtbase = (byte *)maptex2;
+                mdir = (int *)(maptex2 + 1);
+            }
+            int off = LONG(mdir[i < numtextures1 ? i : i - numtextures1]);
+            maptexture_t *mt = (maptexture_t *)(mtbase + off);
+            int w = SHORT(mt->width);
+            total_col_bytes += w * (sizeof(short) + sizeof(unsigned short));
+        }
+        total_col_bytes = (total_col_bytes + 3) & ~3;
+        extern void *m_malloc_maybe(size_t);
+        extern void gc_collect(void);
+        gc_collect();
+        col_pool = m_malloc_maybe(total_col_bytes);
+        if (col_pool) {
+            memset(col_pool, 0, total_col_bytes);
+            col_pool_size = total_col_bytes;
+            col_pool_offset = 0;
+        }
+    }
+#endif
+
     totalwidth = 0;
-    
+
     //	Really complex printing shit...
     temp1 = W_GetNumForName (DEH_String("S_START"));  // P_???????
     temp2 = W_GetNumForName (DEH_String("S_END")) - 1;
