@@ -179,13 +179,14 @@ def rom_browser(roms):
                 return None
 
 # --- Pause Menu ---
-def pause_menu(rom_filename, current_palette, audio_on, fps_on):
+def pause_menu(rom_filename, current_palette, audio_on, fps_on, fskip_on):
     has_state = has_save_state(rom_filename)
     options = [
         "Resume",
         "Palette: " + PALETTE_NAMES[current_palette],
         "Audio: " + ("On" if audio_on else "Off"),
         "FPS: " + ("On" if fps_on else "Off"),
+        "FrameSkip: " + ("On" if fskip_on else "Off"),
         "Save State",
         "Load State" + ("" if has_state else " (none)"),
         "Reset",
@@ -216,12 +217,19 @@ def pause_menu(rom_filename, current_palette, audio_on, fps_on):
         options[1] = "Palette: " + PALETTE_NAMES[current_palette]
         options[2] = "Audio: " + ("On" if audio_on else "Off")
         options[3] = "FPS: " + ("On" if fps_on else "Off")
+        options[4] = "FrameSkip: " + ("On" if fskip_on else "Off")
         for i, opt in enumerate(options):
             prefix = "> " if i == cursor else "  "
             items[i].text = prefix + opt
 
     refresh()
     result = "resume"
+
+    # Burn ticks until MENU is released (avoid instant re-trigger)
+    while True:
+        if engine.tick():
+            if not engine_io.MENU.is_pressed:
+                break
 
     while True:
         if engine.tick():
@@ -256,26 +264,31 @@ def pause_menu(rom_filename, current_palette, audio_on, fps_on):
                     gb_emu.set_show_fps(fps_on)
                     refresh()
                     continue
-                elif cursor == 4:  # Save State
-                    if save_state(rom_filename):
-                        items[4].text = "> State Saved!"
-                    else:
-                        items[4].text = "> Save Failed!"
+                elif cursor == 4:  # Frame Skip
+                    fskip_on = not fskip_on
+                    gb_emu.set_frame_skip(fskip_on)
+                    refresh()
                     continue
-                elif cursor == 5:  # Load State
+                elif cursor == 5:  # Save State
+                    if save_state(rom_filename):
+                        items[5].text = "> State Saved!"
+                    else:
+                        items[5].text = "> Save Failed!"
+                    continue
+                elif cursor == 6:  # Load State
                     if load_state(rom_filename):
                         result = "resume"
                     else:
-                        items[5].text = "> No State Found"
+                        items[6].text = "> No State Found"
                         continue
-                elif cursor == 6:  # Reset
+                elif cursor == 7:  # Reset
                     result = "reset"
-                elif cursor == 7:  # Quit
+                elif cursor == 8:  # Quit
                     result = "quit"
 
                 cam.mark_destroy_children()
                 cam.mark_destroy()
-                return result, current_palette, audio_on, fps_on
+                return result, current_palette, audio_on, fps_on, fskip_on
 
 # --- Main ---
 roms = find_roms()
@@ -300,6 +313,7 @@ else:
 
     audio_on = True
     fps_on = False
+    fskip_on = False
     running = True
     while running:
         # Run emulation entirely in C until MENU is pressed
@@ -307,7 +321,7 @@ else:
 
         # MENU was pressed — show pause menu
         cam.mark_destroy()
-        result, current_palette, audio_on, fps_on = pause_menu(selected, current_palette, audio_on, fps_on)
+        result, current_palette, audio_on, fps_on, fskip_on = pause_menu(selected, current_palette, audio_on, fps_on, fskip_on)
 
         if result == "resume":
             cam = CameraNode()

@@ -9,3 +9,6 @@ filesystem/lib
 doc/build
 .vscode
 **/desktop.ini
+*.gb
+*.gbc
+*.GBC

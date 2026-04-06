@@ -89,6 +89,9 @@ int gb_emu_run_loop(void);
 /* Show/hide FPS counter overlay */
 void gb_emu_set_show_fps(int show);
 
+/* Frame skip: render every other frame (CPU/audio still run each frame) */
+void gb_emu_set_frame_skip(int enabled);
+
 /* Save states: snapshot/restore full emulator state */
 size_t gb_emu_get_state_size(void);
 int gb_emu_save_state(uint8_t *buf, size_t buf_size);

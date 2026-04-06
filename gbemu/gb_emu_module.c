@@ -119,11 +119,9 @@ static mp_obj_t gb_emu_mp_set_show_fps(mp_obj_t show_obj) {
 MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_set_show_fps_obj, gb_emu_mp_set_show_fps);
 
 /* gb_emu.run_loop() -> int (frame count)
- * High-performance all-C frame loop. Runs until MENU pressed.
- * Frees dynamic buffers on exit to release memory for other games. */
+ * High-performance all-C frame loop. Runs until MENU pressed. */
 static mp_obj_t gb_emu_mp_run_loop(void) {
     int frames = gb_emu_run_loop();
-    gb_emu_deinit();
     return mp_obj_new_int(frames);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_run_loop_obj, gb_emu_mp_run_loop);
@@ -135,6 +133,13 @@ static mp_obj_t gb_emu_mp_deinit(void) {
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(gb_emu_mp_deinit_obj, gb_emu_mp_deinit);
+
+/* gb_emu.set_frame_skip(bool) -> None */
+static mp_obj_t gb_emu_mp_set_frame_skip(mp_obj_t enabled_obj) {
+    gb_emu_set_frame_skip(mp_obj_is_true(enabled_obj) ? 1 : 0);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_1(gb_emu_mp_set_frame_skip_obj, gb_emu_mp_set_frame_skip);
 
 /* gb_emu.set_audio_enabled(bool) -> None */
 static mp_obj_t gb_emu_mp_set_audio_enabled(mp_obj_t enabled_obj) {
@@ -202,6 +207,7 @@ static const mp_rom_map_elem_t gb_emu_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_run_loop),          MP_ROM_PTR(&gb_emu_mp_run_loop_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_show_fps),    MP_ROM_PTR(&gb_emu_mp_set_show_fps_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_audio_enabled), MP_ROM_PTR(&gb_emu_mp_set_audio_enabled_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_set_frame_skip),  MP_ROM_PTR(&gb_emu_mp_set_frame_skip_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_set_crop),        MP_ROM_PTR(&gb_emu_mp_set_crop_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_get_crop),        MP_ROM_PTR(&gb_emu_mp_get_crop_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_save_state),      MP_ROM_PTR(&gb_emu_mp_save_state_obj) },
