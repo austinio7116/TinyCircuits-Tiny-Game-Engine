@@ -6,3 +6,4 @@
 include(${CMAKE_CURRENT_LIST_DIR}/src/micropython.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/gbemu/micropython.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/chess/micropython.cmake)
+include(${CMAKE_CURRENT_LIST_DIR}/doom/micropython.cmake)
