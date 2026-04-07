@@ -22,7 +22,7 @@ UF2_FLAG_FAMILY  = 0x00002000
 RP2350_FAMILY_ID = 0xe48bff57
 
 # Target flash address (XIP base + offset)
-WAD_FLASH_ADDR = 0x10400000  # XIP base 0x10000000 + 4MB offset
+WAD_FLASH_ADDR = 0x10200000  # XIP base 0x10000000 + 2MB offset (must match w_file_xip.c)
 
 # UF2 payload size per block
 PAYLOAD_SIZE = 256

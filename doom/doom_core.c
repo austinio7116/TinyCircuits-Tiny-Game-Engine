@@ -82,14 +82,17 @@ static void poll_buttons(void) {
     if (button_is_pressed(&BUTTON_B))          cur |= (1 << 5);
     if (button_is_pressed(&BUTTON_BUMPER_LEFT))  cur |= (1 << 6);
     if (button_is_pressed(&BUTTON_BUMPER_RIGHT)) cur |= (1 << 7);
+    if (button_is_pressed(&BUTTON_MENU))       cur |= (1 << 8);
 
     /* Button→DOOM key mapping:
      * D-pad up/down    = forward/back
      * D-pad left/right = turn left/right
      * A                = fire + enter (fire in game, enter in menus)
-     * B                = use + escape (use/open in game, back in menus)
-     * LB               = strafe modifier
-     * RB               = weapon cycle
+     * B                = use/open doors
+     * LB               = strafe left
+     * RB               = strafe right
+     * MENU short-press = escape (DOOM menu)
+     * MENU long-press  = exit to launcher (handled in run_loop)
      */
     static const struct { uint16_t mask; unsigned char key; } mapping[] = {
         { 1 << 0, KEY_UPARROW },
@@ -99,9 +102,9 @@ static void poll_buttons(void) {
         { 1 << 4, KEY_FIRE },
         { 1 << 4, KEY_ENTER },     /* A also sends Enter for menus */
         { 1 << 5, KEY_USE },
-        { 1 << 5, KEY_ESCAPE },    /* B also sends Escape for menus */
         { 1 << 6, KEY_STRAFE_L },
-        { 1 << 7, '/' },  /* next weapon */
+        { 1 << 7, KEY_STRAFE_R },
+        { 1 << 8, KEY_ESCAPE },    /* MENU = open DOOM menu */
     };
 
     uint16_t changed = cur ^ prev_buttons;
@@ -310,8 +313,8 @@ int doom_core_run_loop(void) {
         if (!engine_tick())
             continue;
 
-        /* Check MENU for exit */
-        if (button_is_just_pressed(&BUTTON_MENU))
+        /* Long-press MENU to exit to launcher */
+        if (button_is_just_long_pressed(&BUTTON_MENU))
             break;
 
         /* Poll buttons and push key events */
