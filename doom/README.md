@@ -25,9 +25,11 @@ plan see `../../DOOM_PLAN.md` history; this document supersedes it.
 - **No audio.** All sound functions are stubbed.
 - **No screen wipes** (saved ~33 KB BSS).
 - **No savegames.**
-- **Door-opening on E1M1 can OOM.** The texture composite for `BIGDOOR2`
-  needs a contiguous ~16 KB block; the zone heap fragments before then.
-  The crash is reported cleanly via `I_Error`. This is the next thing to fix.
+- **Opening the first big door on E1M1 OOMs the zone heap.** The door itself
+  renders fine; the crash happens once it opens and the room beyond is
+  revealed — most likely a texture composite (or several) for the new
+  geometry / enemies needs a contiguous block the fragmented zone can't
+  provide. Reported cleanly via `I_Error`. This is the next thing to fix.
 - **Intro demos don't run.** The title screen comes up but the attract-mode
   demo playback is broken; it falls through to the menu instead.
 - **Shareware `doom1.wad` only** has been tested. Bigger IWADs need a larger
@@ -306,10 +308,9 @@ the DOOM firmware is loaded.
 
 - **`system_files_digest mismatch`** at boot — you flashed a new firmware but
   forgot to push the matching `system/` and `main.py` (step 5). Re-run that.
-- **`Z_Malloc: failed`** — zone fragmentation, see "Known limitations". For
-  now, avoid the action that triggers it; specifically, don't try to open
-  `BIGDOOR2` on E1M1 from a fully-explored level. Restarting the game gives
-  you a fresh zone.
+- **`Z_Malloc: failed`** — zone fragmentation, see "Known limitations".
+  Most reliably triggered by opening the first big door on E1M1. Restarting
+  the game gives you a fresh zone.
 - **`doom.flash_wad` looks hung** — it isn't. Erasing and programming 4 MB
   of flash on the RP2350 takes several seconds. Don't unplug.
 - **Black screen forever** — the loading bar is drawn directly to the panel.
