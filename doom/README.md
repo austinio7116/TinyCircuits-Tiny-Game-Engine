@@ -11,8 +11,8 @@ plan see `../../DOOM_PLAN.md` history; this document supersedes it.
 
 ## What works
 
-- Title screen, intro demos, menus, fully playable E1M1 (movement, shooting,
-  enemies, item pickups, automap).
+- Title screen, menus, fully playable E1M1 (movement, shooting, enemies,
+  item pickups, automap).
 - WAD streamed from raw flash via XIP at `0x10200000` — no heap copy.
 - Native 128×128 rendering (no 320×200 → downscale buffers).
 - Long-press MENU exits cleanly back to the launcher; short-press opens the
@@ -28,6 +28,8 @@ plan see `../../DOOM_PLAN.md` history; this document supersedes it.
 - **Door-opening on E1M1 can OOM.** The texture composite for `BIGDOOR2`
   needs a contiguous ~16 KB block; the zone heap fragments before then.
   The crash is reported cleanly via `I_Error`. This is the next thing to fix.
+- **Intro demos don't run.** The title screen comes up but the attract-mode
+  demo playback is broken; it falls through to the menu instead.
 - **Shareware `doom1.wad` only** has been tested. Bigger IWADs need a larger
   flash partition and almost certainly more zone heap.
 
