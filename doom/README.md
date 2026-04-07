@@ -4,8 +4,7 @@ A native C-module port of **doomgeneric** running on the TinyCircuits Thumby Col
 (RP2350, 128×128 RGB565, 520 KB SRAM, 16 MB flash). The shareware WAD lives in
 raw flash and is read directly via XIP — zero-copy lump access, no heap WAD load.
 
-This README is the build/deploy guide. For the architecture / memory-budget
-plan see `../../DOOM_PLAN.md` history; this document supersedes it.
+This README is the build/deploy guide and the only DOOM doc in the tree.
 
 ---
 
