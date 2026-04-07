@@ -326,7 +326,7 @@ int W_LumpLength (unsigned int lump)
 {
     if (lump >= numlumps)
     {
-	I_Error ("W_LumpLength: %i >= numlumps", lump);
+	I_Error ("W_LumpLength: %d >= numlumps", lump);
     }
 
     return lumpinfo[lump].size;
@@ -346,7 +346,7 @@ void W_ReadLump(unsigned int lump, void *dest)
 	
     if (lump >= numlumps)
     {
-	I_Error ("W_ReadLump: %i >= numlumps", lump);
+	I_Error ("W_ReadLump: %d >= numlumps", lump);
     }
 
     l = lumpinfo+lump;
@@ -357,7 +357,7 @@ void W_ReadLump(unsigned int lump, void *dest)
 
     if (c < l->size)
     {
-	I_Error ("W_ReadLump: only read %i of %i on lump %i",
+	I_Error ("W_ReadLump: only read %d of %d on lump %d",
 		 c, l->size, lump);	
     }
 
@@ -386,7 +386,7 @@ void *W_CacheLumpNum(int lumpnum, int tag)
 
     if ((unsigned)lumpnum >= numlumps)
     {
-	I_Error ("W_CacheLumpNum: %i >= numlumps", lumpnum);
+	I_Error ("W_CacheLumpNum: %d >= numlumps", lumpnum);
     }
 
     lump = &lumpinfo[lumpnum];
@@ -440,7 +440,7 @@ void W_ReleaseLumpNum(int lumpnum)
 
     if ((unsigned)lumpnum >= numlumps)
     {
-	I_Error ("W_ReleaseLumpNum: %i >= numlumps", lumpnum);
+	I_Error ("W_ReleaseLumpNum: %d >= numlumps", lumpnum);
     }
 
     lump = &lumpinfo[lumpnum];

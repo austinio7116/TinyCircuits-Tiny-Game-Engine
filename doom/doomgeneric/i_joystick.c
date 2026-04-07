@@ -127,7 +127,7 @@ void I_InitJoystick(void)
 
     if (joystick_index < 0 || joystick_index >= SDL_NumJoysticks())
     {
-        printf("I_InitJoystick: Invalid joystick ID: %i\n", joystick_index);
+        printf("I_InitJoystick: Invalid joystick ID: %d\n", joystick_index);
         SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
         return;
     }
@@ -138,7 +138,7 @@ void I_InitJoystick(void)
 
     if (joystick == NULL)
     {
-        printf("I_InitJoystick: Failed to open joystick #%i\n",
+        printf("I_InitJoystick: Failed to open joystick #%d\n",
                joystick_index);
         SDL_QuitSubSystem(SDL_INIT_JOYSTICK);
         return;
@@ -148,7 +148,7 @@ void I_InitJoystick(void)
      || !IsValidAxis(joystick_y_axis)
      || !IsValidAxis(joystick_strafe_axis))
     {
-        printf("I_InitJoystick: Invalid joystick axis for joystick #%i "
+        printf("I_InitJoystick: Invalid joystick axis for joystick #%d "
                "(run joystick setup again)\n",
                joystick_index);
 
@@ -352,7 +352,7 @@ void I_BindJoystickVariables(void)
     for (i = 0; i < NUM_VIRTUAL_BUTTONS; ++i)
     {
         char name[32];
-        M_snprintf(name, sizeof(name), "joystick_physical_button%i", i);
+        M_snprintf(name, sizeof(name), "joystick_physical_button%d", i);
         M_BindVariable(name, &joystick_physical_buttons[i]);
     }
 }

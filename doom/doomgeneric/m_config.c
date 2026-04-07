@@ -1684,11 +1684,11 @@ static void SaveDefaultCollection(default_collection_t *collection)
                     }
                 }
 
-	        fprintf(f, "%i", v);
+	        fprintf(f, "%d", v);
                 break;
 
             case DEFAULT_INT:
-	        fprintf(f, "%i", * (int *) defaults[i].location);
+	        fprintf(f, "%d", * (int *) defaults[i].location);
                 break;
 
             case DEFAULT_INT_HEX:
@@ -1720,7 +1720,7 @@ static int ParseIntParameter(char *strparm)
     if (strparm[0] == '0' && strparm[1] == 'x')
         sscanf(strparm+2, "%x", &parm);
     else
-        sscanf(strparm, "%i", &parm);
+        sscanf(strparm, "%d", &parm);
 
     return parm;
 }

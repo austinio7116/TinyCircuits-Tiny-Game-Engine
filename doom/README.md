@@ -24,11 +24,13 @@ This README is the build/deploy guide and the only DOOM doc in the tree.
 - **No audio.** All sound functions are stubbed.
 - **No screen wipes** (saved ~33 KB BSS).
 - **No savegames.**
-- **Opening the first big door on E1M1 OOMs the zone heap.** The door itself
-  renders fine; the crash happens once it opens and the room beyond is
-  revealed — most likely a texture composite (or several) for the new
-  geometry / enemies needs a contiguous block the fragmented zone can't
-  provide. Reported cleanly via `I_Error`. This is the next thing to fix.
+- **(Should be fixed)** Door-opening OOM on E1M1 — solved by precomputing
+  texture composites on PC and storing them in flash (XIP). See "Composite
+  blob" below. The runtime never allocates a composite, so the
+  fragmentation crash that used to fire when the first big door opened can
+  no longer happen. Verified by byte-comparing the precomputed composites
+  against runtime-generated ones in the Linux emulator (all 79 multi-patch
+  textures matched).
 - **Intro demos don't run.** The title screen comes up but the attract-mode
   demo playback is broken; it falls through to the menu instead.
 - **Shareware `doom1.wad` only** has been tested. Bigger IWADs need a larger
@@ -112,6 +114,7 @@ codepaths. The same source builds on Linux for development.
 |---|---|---|---|
 | Firmware | `0x000000` | 1 MB | MicroPython + engine + DOOM module |
 | **WAD** | **`0x200000`** | **~4.2 MB** | **Shareware `doom1.wad`** |
+| **Composite blob** | **`0x700000`** | **~704 KB** | **Precomputed texture composites + lookups** |
 | LittleFS | `0x800000` | 8 MB | Filesystem (`/Games`, `/Saves`, etc.) |
 
 The standard (non-DOOM) firmware ships with a 13 MB filesystem. The DOOM
@@ -237,7 +240,7 @@ firmware build already laid that down from
 `filesystem/Games/Doom/`. Use `--include-system` if you want it to push the
 backed-up versions instead.
 
-### 7. Flash the WAD
+### 7a. Flash the WAD
 
 Use `flash_wad.py`. It calls `doom.flash_wad()` on the running firmware,
 which programs the WAD to raw flash at `0x200000` via `flash_range_program`
@@ -256,6 +259,42 @@ a little while; **do not unplug** until it finishes.
 > UF2 targeting `0x10200000`. In practice that route did **not** work
 > reliably on the Thumby Color — use `flash_wad.py` instead. The UF2 helper
 > is left in the tree for reference / future debugging.
+
+### 7b. Flash the texture composite blob
+
+This is **mandatory** — without it the firmware refuses to start DOOM with
+`Composite blob missing at 0x10700000 — run flash_composites.py`. The blob
+holds precomputed texture composites and column lookups so the runtime never
+has to allocate a composite from zone heap (which is what was crashing the
+first big door on E1M1).
+
+A prebuilt blob for the shareware `doom1.wad` is checked in at
+`doom/dist/doom1-shareware.cmp`. If you're using the same WAD you can flash
+that directly:
+
+```bash
+cd TinyCircuits-Tiny-Game-Engine/doom/scripts
+python3 flash_composites.py ../dist/doom1-shareware.cmp
+```
+
+If you have a different WAD (e.g. registered, ultimate, custom), build the
+matching blob first with the preprocessor:
+
+```bash
+cd TinyCircuits-Tiny-Game-Engine/doom
+python3 preprocess_composites.py /path/to/your.wad your.cmp
+python3 scripts/flash_composites.py your.cmp
+```
+
+The preprocessor parses TEXTURE1/PNAMES, builds every multi-patch composite
+in pure Python (mirroring `R_GenerateComposite` exactly — verified
+byte-identical against the engine in the Linux emulator), and writes a
+self-describing blob with a header that's checked at runtime against the
+flashed WAD.
+
+The blob is pinned to a specific WAD by `wad_size` + first/last bytes; if
+you re-flash the WAD with a different one, re-flash the matching blob too
+or DOOM will refuse to start.
 
 ### 8. Play
 
@@ -296,9 +335,17 @@ the DOOM firmware is loaded.
 - **`flash_wad.py <wad>`** — copy a WAD onto the device tmp area and call
   `doom.flash_wad()` to program it into raw flash at `0x200000`. Requires the
   DOOM firmware to be running.
+- **`flash_composites.py <blob.cmp>`** — copy a composite blob onto the device
+  tmp area and call `doom.flash_composites()` to program it into raw flash
+  at `0x700000`. Required after every WAD flash (or change). Requires the
+  DOOM firmware to be running.
 - **`make_wad_uf2.py <wad> <out.uf2>`** (in `doom/`, not `scripts/`) — produce
   a BOOTSEL-droppable UF2 that flashes the WAD without needing the DOOM
-  firmware to be running.
+  firmware to be running. Note: the WAD path didn't work reliably on the
+  Thumby Color in practice — `flash_wad.py` is the supported route.
+- **`preprocess_composites.py <wad> <out.cmp>`** (in `doom/`, not `scripts/`) —
+  build a texture composite blob from a WAD on PC. Pure Python, mirrors
+  `R_GenerateLookup` and `R_GenerateComposite` exactly.
 
 ---
 
@@ -306,9 +353,16 @@ the DOOM firmware is loaded.
 
 - **`system_files_digest mismatch`** at boot — you flashed a new firmware but
   forgot to push the matching `system/` and `main.py` (step 5). Re-run that.
-- **`Z_Malloc: failed`** — zone fragmentation, see "Known limitations".
-  Most reliably triggered by opening the first big door on E1M1. Restarting
-  the game gives you a fresh zone.
+- **`Z_Malloc: failed`** — zone fragmentation. With the composite blob
+  flashed (step 7b), this should not happen during normal play. If it
+  does, restart the game (fresh zone) and capture the exact error message
+  — it includes `need`, `tag`, `used`, `free`, `largest` so we can see
+  which allocation class is hitting the limit.
+- **`Composite blob missing at 0x10700000`** — you flashed the firmware and
+  WAD but skipped step 7b. Run `flash_composites.py`.
+- **`Composite blob: WAD first-4 mismatch`** — the blob was built from a
+  different WAD than what's currently flashed. Re-run `preprocess_composites.py`
+  against the right WAD and re-flash.
 - **`doom.flash_wad` looks hung** — it isn't. Erasing and programming 4 MB
   of flash on the RP2350 takes several seconds. Don't unplug.
 - **Black screen forever** — the loading bar is drawn directly to the panel.

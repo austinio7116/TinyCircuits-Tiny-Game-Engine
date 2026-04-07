@@ -19,6 +19,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
 
 #include "deh_main.h"
 #include "i_swap.h"
@@ -229,7 +231,7 @@ void R_GenerateComposite (int texnum)
 {
     byte*		block;
     texture_t*		texture;
-    texpatch_t*		patch;	
+    texpatch_t*		patch;
     patch_t*		realpatch;
     int			x;
     int			x1;
@@ -238,12 +240,18 @@ void R_GenerateComposite (int texnum)
     column_t*		patchcol;
     short*		collump;
     unsigned short*	colofs;
-	
+
     texture = textures[texnum];
 
     block = Z_Malloc (texturecompositesize[texnum],
 		      PU_CACHE,
-		      &texturecomposite[texnum]);	
+		      &texturecomposite[texnum]);
+
+#ifdef DOOM_DUMP_COMPOSITES
+    /* Zero-init so the CRC oracle is deterministic and can be compared
+     * byte-for-byte against the Python preprocessor (which also zero-inits). */
+    memset(block, 0, texturecompositesize[texnum]);
+#endif
 
     collump = texturecolumnlump[texnum];
     colofs = texturecolumnofs[texnum];
@@ -286,6 +294,33 @@ void R_GenerateComposite (int texnum)
     // Now that the texture has been built in column cache,
     //  it is purgable from zone memory.
     Z_ChangeTag (block, PU_CACHE);
+
+#ifdef DOOM_DUMP_COMPOSITES
+    {
+        /* CRC32 of the composite bytes — used to validate the Python
+         * preprocessor against the runtime. CRC table built lazily. */
+        static uint32_t crc_table[256];
+        static int crc_inited = 0;
+        if (!crc_inited) {
+            for (int n = 0; n < 256; n++) {
+                uint32_t c = (uint32_t)n;
+                for (int k = 0; k < 8; k++)
+                    c = (c & 1) ? (0xedb88320u ^ (c >> 1)) : (c >> 1);
+                crc_table[n] = c;
+            }
+            crc_inited = 1;
+        }
+        uint32_t crc = 0xffffffffu;
+        int sz = texturecompositesize[texnum];
+        for (int n = 0; n < sz; n++)
+            crc = crc_table[(crc ^ block[n]) & 0xff] ^ (crc >> 8);
+        crc ^= 0xffffffffu;
+        char nm[9] = {0};
+        memcpy(nm, texture->name, 8);
+        printf("CMP_ORACLE %-8s %6d %08x\n", nm, sz, (unsigned)crc);
+        fflush(stdout);
+    }
+#endif
 }
 
 
@@ -313,10 +348,25 @@ void R_GenerateLookup (int texnum)
 
     texturecompositesize[texnum] = 0;
 
-    /* Lazy allocation — arrays may not exist yet on device */
+    /* Lazy allocation — arrays may not exist yet on device.
+     * IMPORTANT: allocate OFF the zone (calloc) so these small per-texture
+     * lookups don't fragment the zone heap. Each one is a long-lived
+     * PU_STATIC-equivalent that never gets freed during gameplay; if they
+     * land in the zone, they create permanent holes between PU_CACHE blocks
+     * and prevent later large composite allocations (e.g. door textures
+     * needing a contiguous ~16KB block).  Z_Free's non-zone-pointer guard
+     * means the rest of the engine treats these transparently. */
     if (texturecolumnlump[texnum] == NULL) {
+#if defined(DOOM_THUMBY) && defined(__arm__)
+        texturecolumnlump[texnum] = calloc(texture->width, sizeof(short));
+        texturecolumnofs[texnum]  = calloc(texture->width, sizeof(unsigned short));
+        if (!texturecolumnlump[texnum] || !texturecolumnofs[texnum])
+            I_Error("R_GenerateLookup: calloc failed for texture %d (w=%d)",
+                    texnum, texture->width);
+#else
         texturecolumnlump[texnum] = Z_Malloc(texture->width * sizeof(short), PU_STATIC, 0);
         texturecolumnofs[texnum] = Z_Malloc(texture->width * sizeof(unsigned short), PU_STATIC, 0);
+#endif
     }
     collump = texturecolumnlump[texnum];
     colofs = texturecolumnofs[texnum];
@@ -375,7 +425,7 @@ void R_GenerateLookup (int texnum)
 	    
 	    if (texturecompositesize[texnum] > 0x10000-texture->height)
 	    {
-		I_Error ("R_GenerateLookup: texture %i is >64k",
+		I_Error ("R_GenerateLookup: texture %d is >64k",
 			 texnum);
 	    }
 	    
@@ -400,23 +450,22 @@ R_GetColumn
     int		lump;
     int		ofs;
 
-#if defined(DOOM_THUMBY) && defined(__arm__)
-    /* Lazy texture lookup generation */
-    if (texturecolumnlump[tex] == NULL)
-	R_GenerateLookup(tex);
-#endif
-
     col &= texturewidthmask[tex];
     lump = texturecolumnlump[tex][col];
     ofs = texturecolumnofs[tex][col];
-    
+
     if (lump > 0)
 	return (byte *)W_CacheLumpNum(lump,PU_CACHE)+ofs;
 
+#if (defined(DOOM_THUMBY) && defined(__arm__)) || defined(DOOM_USE_BLOB_FILE)
+    /* Composite is pre-baked into the blob — no on-demand generation. */
+    return texturecomposite[tex] + ofs;
+#else
     if (!texturecomposite[tex])
 	R_GenerateComposite (tex);
 
     return texturecomposite[tex] + ofs;
+#endif
 }
 
 
@@ -461,6 +510,147 @@ static void GenerateTextureHashTable(void)
     }
 }
 
+
+/* On Unix the blob is loaded from a file via texture_flash_blob_load_file();
+ * on ARM it's mapped in flash via XIP at CMP_FLASH_BASE. Both paths share
+ * the same parsing logic in texture_flash_blob_init(). */
+#if (defined(DOOM_THUMBY) && defined(__arm__)) || defined(DOOM_USE_BLOB_FILE)
+// ============================================================================
+// Texture composite flash blob loader
+// ============================================================================
+//
+// On device, the per-texture column lookup tables AND the multi-patch
+// composite pixels live in a fixed flash region (XIP) populated by
+// preprocess_composites.py and flashed via doom.flash_composites().
+//
+// At init we validate the blob's header, then point texturecomposite[i],
+// texturecolumnlump[i], texturecolumnofs[i] at flash addresses inside the
+// blob. R_GenerateLookup and R_GenerateComposite are never called on the
+// device path, so the zone never sees a single texture composite allocation.
+//
+// Blob layout matches doom/preprocess_composites.py exactly. See that file
+// for the format spec.
+
+#define CMP_FLASH_BASE   0x10700000u
+#define CMP_MAGIC        0x504D4344u   /* 'DCMP' */
+#define CMP_VERSION      1u
+#define CMP_NO_COMPOSITE 0xFFFFFFFFu
+
+struct __attribute__((packed)) cmp_header {
+    uint32_t magic;
+    uint16_t version;
+    uint16_t numtextures;
+    uint32_t wad_size;
+    uint32_t wad_first4;
+    uint32_t wad_last4;
+    uint32_t table_offset;
+    uint32_t total_size;
+};
+
+struct __attribute__((packed)) cmp_entry {
+    uint16_t width;
+    uint16_t height;
+    uint32_t columnlump_offset;
+    uint32_t columnofs_offset;
+    uint32_t composite_offset;
+};
+
+#ifdef DOOM_USE_BLOB_FILE
+/* Unix verification path: load the blob from a file into a malloc'd buffer
+ * and pretend it's our flash region. Triggered by setting the environment
+ * variable DOOM_CMP_FILE before doom.init(). */
+static const uint8_t *cmp_blob_buffer = NULL;
+static void texture_flash_blob_load_file(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) I_Error("Composite blob: cannot open %s", path);
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    uint8_t *buf = malloc(sz);
+    if (!buf) I_Error("Composite blob: malloc(%ld) failed", sz);
+    if (fread(buf, 1, sz, f) != (size_t)sz) I_Error("Composite blob: short read");
+    fclose(f);
+    cmp_blob_buffer = buf;
+    printf("Composite blob: loaded %ld bytes from %s\n", sz, path);
+}
+#endif
+
+static void texture_flash_blob_init(void)
+{
+#if defined(DOOM_THUMBY) && defined(__arm__)
+    const uint8_t *base = (const uint8_t *)CMP_FLASH_BASE;
+#else
+    /* Unix: use the buffer loaded by texture_flash_blob_load_file(). */
+    if (cmp_blob_buffer == NULL) {
+        const char *p = getenv("DOOM_CMP_FILE");
+        if (p) texture_flash_blob_load_file(p);
+        else   I_Error("Composite blob: set DOOM_CMP_FILE env var");
+    }
+    const uint8_t *base = cmp_blob_buffer;
+#endif
+    struct cmp_header hdr;
+    /* Use memcpy to avoid any alignment surprises on Cortex-M33 with packed
+     * structs. */
+    memcpy(&hdr, base, sizeof(hdr));
+
+    if (hdr.magic != CMP_MAGIC) {
+        I_Error("Composite blob missing at 0x%08x — run flash_composites.py",
+                (unsigned)CMP_FLASH_BASE);
+    }
+    if (hdr.version != CMP_VERSION) {
+        I_Error("Composite blob version %u, expected %u",
+                (unsigned)hdr.version, (unsigned)CMP_VERSION);
+    }
+    if ((int)hdr.numtextures != numtextures) {
+        I_Error("Composite blob numtextures %u, WAD has %d",
+                (unsigned)hdr.numtextures, numtextures);
+    }
+
+#if defined(DOOM_THUMBY) && defined(__arm__)
+    /* WAD identity sanity check.  We know the WAD lives at 0x10200000 via
+     * w_file_xip.c, so cross-check the first 4 bytes against the value
+     * preprocess_composites.py recorded for the WAD it was built from. */
+    const uint8_t *xip_wad = (const uint8_t *)0x10200000;
+    uint32_t actual_first4;
+    memcpy(&actual_first4, xip_wad, 4);
+    if (actual_first4 != hdr.wad_first4) {
+        I_Error("Composite blob: WAD first-4 mismatch (blob 0x%08x, WAD 0x%08x)",
+                (unsigned)hdr.wad_first4, (unsigned)actual_first4);
+    }
+#endif
+
+    /* Walk the per-texture table and point our existing arrays at flash. */
+    const uint8_t *table = base + hdr.table_offset;
+    for (int i = 0; i < numtextures; i++) {
+        struct cmp_entry e;
+        memcpy(&e, table + i * sizeof(struct cmp_entry), sizeof(e));
+
+        if ((int)e.width != textures[i]->width ||
+            (int)e.height != textures[i]->height) {
+            I_Error("Composite blob: texture %d size mismatch "
+                    "(blob %ux%u vs WAD %dx%d)",
+                    i, (unsigned)e.width, (unsigned)e.height,
+                    textures[i]->width, textures[i]->height);
+        }
+
+        /* Cast away const — the existing storage types are non-const for
+         * compatibility with the original Z_Malloc-based path.  Nothing
+         * writes to these flash regions at runtime. */
+        texturecolumnlump[i] = (short *)(base + e.columnlump_offset);
+        texturecolumnofs[i]  = (unsigned short *)(base + e.columnofs_offset);
+        texturecomposite[i]  = (e.composite_offset == CMP_NO_COMPOSITE)
+                               ? NULL
+                               : (byte *)(base + e.composite_offset);
+        /* texturecompositesize is not consulted at runtime once the blob is
+         * in place — R_GenerateComposite is never called from R_GetColumn. */
+    }
+
+    printf("Composite blob: %d tex, %u KB at 0x%08x\n",
+           (int)hdr.numtextures, (unsigned)(hdr.total_size / 1024),
+           (unsigned)CMP_FLASH_BASE);
+}
+#endif /* DOOM_THUMBY && __arm__ */
 
 //
 // R_InitTextures
@@ -684,12 +874,31 @@ void R_InitTextures (void)
     
     // Precalculate whatever possible.	
 
-#if defined(DOOM_THUMBY) && defined(__arm__)
-    /* Device: defer texture lookup generation to save zone during level load.
-     * R_GetColumn will call R_GenerateLookup lazily on first access. */
+#if (defined(DOOM_THUMBY) && defined(__arm__)) || defined(DOOM_USE_BLOB_FILE)
+    /* Device: load all column lookups and composite pixels from a flash-
+     * resident blob produced by preprocess_composites.py. After this call,
+     * texturecolumnlump[i] / texturecolumnofs[i] / texturecomposite[i] all
+     * point into XIP flash (or a malloc'd buffer in the Unix verification
+     * build), and R_GenerateLookup / R_GenerateComposite are never called.
+     * Result: zero PU_CACHE composite allocations during gameplay, which
+     * kills the texture-fragmentation OOM at its source. */
+    texture_flash_blob_init();
 #else
     for (i=0 ; i<numtextures ; i++)
 	R_GenerateLookup (i);
+#endif
+
+#ifdef DOOM_DUMP_COMPOSITES
+    /* Force every multi-patch texture to generate its composite right now,
+     * so the CRC oracle covers all textures (not just the ones rendered in
+     * a particular play session). */
+    printf("CMP_ORACLE_BEGIN\n");
+    for (i = 0; i < numtextures; i++) {
+        if (texturecompositesize[i] > 0)
+            R_GenerateComposite(i);
+    }
+    printf("CMP_ORACLE_END\n");
+    fflush(stdout);
 #endif
     
     // Create translation table for global animation.

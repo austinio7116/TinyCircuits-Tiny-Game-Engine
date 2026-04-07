@@ -139,6 +139,67 @@ static mp_obj_t doom_mp_flash_wad(mp_obj_t file_obj, mp_obj_t size_obj) {
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_2(doom_mp_flash_wad_obj, doom_mp_flash_wad);
+
+/* doom.flash_composites(file_obj, size) -> None
+ * Write the texture composite blob (built by preprocess_composites.py) to
+ * raw flash at COMPOSITE_FLASH_OFFSET. The blob is XIP-mapped at
+ * 0x10000000 + COMPOSITE_FLASH_OFFSET and consumed by r_data.c at init. */
+#define COMPOSITE_FLASH_OFFSET 0x700000  /* must match CMP_FLASH_BASE in r_data.c */
+
+static mp_obj_t doom_mp_flash_composites(mp_obj_t file_obj, mp_obj_t size_obj) {
+    size_t blob_size = mp_obj_get_int(size_obj);
+    const mp_stream_p_t *stream_p = mp_get_stream(file_obj);
+    int errcode = 0;
+    uint8_t buf[4096];
+
+    /* Sanity: refuse to clobber the WAD or the filesystem region. */
+    if (blob_size > (8 * 1024 * 1024 - COMPOSITE_FLASH_OFFSET)) {
+        mp_raise_msg_varg(&mp_type_ValueError,
+                          MP_ERROR_TEXT("composite blob too large: %u bytes"),
+                          (unsigned)blob_size);
+    }
+
+    /* Seek to start */
+    struct mp_stream_seek_t seek_s = { .offset = 0, .whence = 0 };
+    stream_p->ioctl(file_obj, MP_STREAM_SEEK, (mp_uint_t)(uintptr_t)&seek_s, &errcode);
+
+    mp_printf(&mp_plat_print, "Erasing flash at 0x%x (%dKB)...\n",
+              COMPOSITE_FLASH_OFFSET, blob_size / 1024);
+
+    size_t erase_size = (blob_size + 4095) & ~4095;
+    uint32_t ints = save_and_disable_interrupts();
+    flash_range_erase(COMPOSITE_FLASH_OFFSET, erase_size);
+    restore_interrupts(ints);
+
+    mp_printf(&mp_plat_print, "Programming %dKB...\n", blob_size / 1024);
+
+    for (size_t off = 0; off < blob_size; off += sizeof(buf)) {
+        size_t chunk = blob_size - off;
+        if (chunk > sizeof(buf)) chunk = sizeof(buf);
+
+        size_t total_read = 0;
+        while (total_read < chunk) {
+            size_t got = stream_p->read(file_obj, buf + total_read,
+                                        chunk - total_read, &errcode);
+            if (got == 0) break;
+            total_read += got;
+        }
+        if (total_read < sizeof(buf))
+            memset(buf + total_read, 0xFF, sizeof(buf) - total_read);
+
+        ints = save_and_disable_interrupts();
+        flash_range_program(COMPOSITE_FLASH_OFFSET + off, buf, sizeof(buf));
+        restore_interrupts(ints);
+
+        if ((off & 0x1FFFF) == 0)
+            mp_printf(&mp_plat_print, "  %d%%\n", (int)(off * 100 / blob_size));
+    }
+
+    mp_printf(&mp_plat_print, "Composites flashed to 0x%x (%dKB)\n",
+              COMPOSITE_FLASH_OFFSET, blob_size / 1024);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_2(doom_mp_flash_composites_obj, doom_mp_flash_composites);
 #endif
 
 /* doom.run_loop() -> int (frame count) */
@@ -167,6 +228,7 @@ static const mp_rom_map_elem_t doom_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_load_cache), MP_ROM_PTR(&doom_mp_load_cache_obj) },
 #ifdef __arm__
     { MP_OBJ_NEW_QSTR(MP_QSTR_flash_wad), MP_ROM_PTR(&doom_mp_flash_wad_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_flash_composites), MP_ROM_PTR(&doom_mp_flash_composites_obj) },
 #endif
     { MP_OBJ_NEW_QSTR(MP_QSTR_deinit),   MP_ROM_PTR(&doom_mp_deinit_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_run_loop), MP_ROM_PTR(&doom_mp_run_loop_obj) },

@@ -63,11 +63,16 @@ char doom_error_msg[512];
 
 /* Zone heap size. On device, GC heap is only ~176KB total.
  * DG_ScreenBuffer uses 64KB. Zone gets whatever's left. */
-#ifdef DOOM_THUMBY
+#if defined(DOOM_THUMBY) && defined(__arm__)
 /* With XIP, lump data stays in flash — but texture structures,
  * level data, and runtime state still need zone.
  * Try to get as much as possible — allocator steps down. */
 #define DOOM_ZONE_KB 256
+#elif defined(DOOM_THUMBY)
+/* Unix verification build: WAD lumps go through zone (no XIP), so a 256KB
+ * zone won't hold a typical level — give it room to actually exercise the
+ * rendering paths. We're not measuring real device memory pressure here. */
+#define DOOM_ZONE_KB 4096
 #else
 #define DOOM_ZONE_KB 1024
 #endif
@@ -148,7 +153,7 @@ static byte *AutoAllocMemory(int *size, int default_ram, int min_ram)
     {
         if (default_ram < min_ram)
         {
-            I_Error("Unable to allocate %i MiB of RAM for zone", default_ram);
+            I_Error("Unable to allocate %d MiB of RAM for zone", default_ram);
         }
 
         *size = default_ram * 1024 * 1024;

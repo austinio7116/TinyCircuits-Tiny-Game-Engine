@@ -948,7 +948,7 @@ void G_Ticker (void)
 		if (gametic > BACKUPTICS 
 		    && consistancy[i][buf] != cmd->consistancy) 
 		{ 
-		    I_Error ("consistency failure (%i should be %i)",
+		    I_Error ("consistency failure (%d should be %d)",
 			     cmd->consistancy, consistancy[i][buf]); 
 		} 
 		if (players[i].mo) 
@@ -1227,7 +1227,7 @@ void G_DeathMatchSpawnPlayer (int playernum)
 	 
     selections = deathmatch_p - deathmatchstarts; 
     if (selections < 4) 
-	I_Error ("Only %i deathmatch spots, 4 required", selections); 
+	I_Error ("Only %d deathmatch spots, 4 required", selections); 
  
     for (j=0 ; j<20 ; j++) 
     { 
@@ -2144,7 +2144,7 @@ static char *DemoVersionDescription(int version)
     else
     {
         M_snprintf(resultbuf, sizeof(resultbuf),
-                   "%i.%i (unknown)", version / 100, version % 100);
+                   "%d.%d (unknown)", version / 100, version % 100);
         return resultbuf;
     }
 }
@@ -2172,7 +2172,7 @@ void G_DoPlayDemo (void)
     else
     {
         char *message = "Demo is from a different game version!\n"
-                        "(read %i, should be %i)\n"
+                        "(read %d, should be %d)\n"
                         "\n"
                         "*** You may need to upgrade your version "
                             "of Doom to v1.9. ***\n"
@@ -2262,7 +2262,7 @@ boolean G_CheckDemoStatus (void)
         timingdemo = false;
         demoplayback = false;
 
-	I_Error ("timed %i gametics in %i realtics (%f fps)",
+	I_Error ("timed %d gametics in %d realtics (%f fps)",
                  gametic, realtics, (double)fps);
     } 
 	 

@@ -268,7 +268,7 @@ Z_Malloc
                 }
                 b = b->next;
             }
-            I_Error ("Z_Malloc: need %i tag %i, zone %dKB, used %dKB, free %dKB, largest %dKB",
+            I_Error ("Z_Malloc: need %d tag %d, zone %dKB, used %dKB, free %dKB, largest %dKB",
                      size, tag, doom_zone_size_kb, used/1024, free_mem/1024, largest_free/1024);
         }
 	
@@ -381,10 +381,10 @@ Z_DumpHeap
 {
     memblock_t*	block;
 	
-    printf ("zone size: %i  location: %p\n",
+    printf ("zone size: %d  location: %p\n",
 	    mainzone->size,mainzone);
     
-    printf ("tag range: %i to %i\n",
+    printf ("tag range: %d to %d\n",
 	    lowtag, hightag);
 	
     for (block = mainzone->blocklist.next ; ; block = block->next)
@@ -418,7 +418,7 @@ void Z_FileDumpHeap (FILE* f)
 {
     memblock_t*	block;
 	
-    fprintf (f,"zone size: %i  location: %p\n",mainzone->size,mainzone);
+    fprintf (f,"zone size: %d  location: %p\n",mainzone->size,mainzone);
 	
     for (block = mainzone->blocklist.next ; ; block = block->next)
     {
@@ -489,11 +489,11 @@ void Z_ChangeTag2(void *ptr, int tag, char *file, int line)
     block = (memblock_t *) ((byte *)ptr - sizeof(memblock_t));
 
     if (block->id != ZONEID)
-        I_Error("%s:%i: Z_ChangeTag: block without a ZONEID!",
+        I_Error("%s:%d: Z_ChangeTag: block without a ZONEID!",
                 file, line);
 
     if (tag >= PU_PURGELEVEL && block->user == NULL)
-        I_Error("%s:%i: Z_ChangeTag: an owner is required "
+        I_Error("%s:%d: Z_ChangeTag: an owner is required "
                 "for purgable blocks", file, line);
 
     block->tag = tag;

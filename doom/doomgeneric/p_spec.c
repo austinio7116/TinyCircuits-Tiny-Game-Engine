@@ -1074,7 +1074,7 @@ void P_PlayerInSpecialSector (player_t* player)
 			
       default:
 	I_Error ("P_PlayerInSpecialSector: "
-		 "unknown special %i",
+		 "unknown special %d",
 		 sector->special);
 	break;
     };

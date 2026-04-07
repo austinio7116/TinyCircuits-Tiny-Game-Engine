@@ -1355,7 +1355,7 @@ void P_WriteSaveGameHeader(char *description)
         saveg_write8(0);
 
     memset(name, 0, sizeof(name));
-    M_snprintf(name, sizeof(name), "version %i", G_VanillaVersionCode());
+    M_snprintf(name, sizeof(name), "version %d", G_VanillaVersionCode());
 
     for (i=0; i<VERSIONSIZE; ++i)
         saveg_write8(name[i]);
@@ -1392,7 +1392,7 @@ boolean P_ReadSaveGameHeader(void)
         read_vcheck[i] = saveg_read8();
 
     memset(vcheck, 0, sizeof(vcheck));
-    M_snprintf(vcheck, sizeof(vcheck), "version %i", G_VanillaVersionCode());
+    M_snprintf(vcheck, sizeof(vcheck), "version %d", G_VanillaVersionCode());
     if (strcmp(read_vcheck, vcheck) != 0)
 	return false;				// bad version 
 
@@ -1664,7 +1664,7 @@ void P_UnArchiveThinkers (void)
 	    break;
 
 	  default:
-	    I_Error ("Unknown tclass %i in savegame",tclass);
+	    I_Error ("Unknown tclass %d in savegame",tclass);
 	}
 	
     }
@@ -1881,7 +1881,7 @@ void P_UnArchiveSpecials (void)
 	    break;
 				
 	  default:
-	    I_Error ("P_UnarchiveSpecials:Unknown tclass %i "
+	    I_Error ("P_UnarchiveSpecials:Unknown tclass %d "
 		     "in savegame",tclass);
 	}
 	

@@ -374,7 +374,7 @@ void D_BindVariables(void)
     {
         char buf[12];
 
-        M_snprintf(buf, sizeof(buf), "chatmacro%i", i);
+        M_snprintf(buf, sizeof(buf), "chatmacro%d", i);
         M_BindVariable(buf, &chat_macros[i]);
     }
 }
@@ -607,31 +607,31 @@ static char *banners[] =
 {
     // doom2.wad
     "                         "
-    "DOOM 2: Hell on Earth v%i.%i"
+    "DOOM 2: Hell on Earth v%d.%d"
     "                           ",
     // doom1.wad
     "                            "
-    "DOOM Shareware Startup v%i.%i"
+    "DOOM Shareware Startup v%d.%d"
     "                           ",
     // doom.wad
     "                            "
-    "DOOM Registered Startup v%i.%i"
+    "DOOM Registered Startup v%d.%d"
     "                           ",
     // Registered DOOM uses this
     "                          "
-    "DOOM System Startup v%i.%i"
+    "DOOM System Startup v%d.%d"
     "                          ",
     // doom.wad (Ultimate DOOM)
     "                         "
-    "The Ultimate DOOM Startup v%i.%i"
+    "The Ultimate DOOM Startup v%d.%d"
     "                        ",
     // tnt.wad
     "                     "
-    "DOOM 2: TNT - Evilution v%i.%i"
+    "DOOM 2: TNT - Evilution v%d.%d"
     "                           ",
     // plutonia.wad
     "                   "
-    "DOOM 2: Plutonia Experiment v%i.%i"
+    "DOOM 2: Plutonia Experiment v%d.%d"
     "                           ",
 };
 
@@ -1344,7 +1344,7 @@ void D_DoomMain (void)
 	    scale = 10;
 	if (scale > 400)
 	    scale = 400;
-        DEH_printf("turbo scale: %i%%\n", scale);
+        DEH_printf("turbo scale: %d%%\n", scale);
 	forwardmove[0] = forwardmove[0]*scale/100;
 	forwardmove[1] = forwardmove[1]*scale/100;
 	sidemove[0] = sidemove[0]*scale/100;
@@ -1542,7 +1542,7 @@ void D_DoomMain (void)
             }
         }
 
-        printf("  loaded %i DEHACKED lumps from PWAD files.\n", loaded);
+        printf("  loaded %d DEHACKED lumps from PWAD files.\n", loaded);
     }
 #endif
 
