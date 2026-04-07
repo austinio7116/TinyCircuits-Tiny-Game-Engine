@@ -240,32 +240,23 @@ backed-up versions instead.
 
 ### 7. Flash the WAD
 
-There are two ways. Pick whichever you prefer.
-
-**Option A — `doom.flash_wad()` from MicroPython (recommended).** This uses
-the running firmware to write the WAD to raw flash via `flash_range_program`,
-so you don't need to enter BOOTSEL again.
+Use `flash_wad.py`. It calls `doom.flash_wad()` on the running firmware,
+which programs the WAD to raw flash at `0x200000` via `flash_range_program`
+and prints a percentage as it goes:
 
 ```bash
 cd TinyCircuits-Tiny-Game-Engine/doom/scripts
 python3 flash_wad.py /path/to/doom1.wad
 ```
 
-The script copies the WAD to the device, then runs a tiny MicroPython snippet
-that calls `doom.flash_wad(open('doom1.wad','rb'), os.stat('doom1.wad')[6])`.
-The device is unresponsive for a few seconds while it erases and programs
-~4.2 MB of flash. **Do not unplug it.**
+The script copies the WAD to the device filesystem, then runs a snippet that
+opens it and calls `doom.flash_wad()`. Erasing and programming ~4.2 MB takes
+a little while; **do not unplug** until it finishes.
 
-**Option B — UF2 drop.** Generate a UF2 that targets `0x10200000` and drag
-it onto the BOOTSEL drive:
-
-```bash
-cd TinyCircuits-Tiny-Game-Engine/doom
-python3 make_wad_uf2.py /path/to/doom1.wad doom1_wad.uf2
-```
-
-Then BOOTSEL the device (hold D-pad DOWN, power on) and copy the UF2 onto
-the RP2350 drive.
+> Note: there is also a `make_wad_uf2.py` that produces a BOOTSEL-droppable
+> UF2 targeting `0x10200000`. In practice that route did **not** work
+> reliably on the Thumby Color — use `flash_wad.py` instead. The UF2 helper
+> is left in the tree for reference / future debugging.
 
 ### 8. Play
 
