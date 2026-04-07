@@ -178,7 +178,15 @@ python3 backup_device.py /home/you/thumby_backup
 This pulls `Games/`, `Saves/`, `system/` and `main.py` off the device. Keep
 this directory safe — it is how you'll restore everything afterwards.
 
-### 3. Build the DOOM firmware
+### 3. Build the DOOM firmware (or use the prebuilt one)
+
+A prebuilt UF2 is checked into this branch at
+`doom/dist/thumby-color-doom-firmware.uf2`. If you use that, skip straight to
+step 4 — but note you must still push the matching `system/` and `main.py`
+from this same branch's `filesystem/` tree in step 5, or the launcher will
+hit a digest mismatch.
+
+To build it yourself:
 
 ```bash
 cd TinyCircuits-Tiny-Game-Engine
