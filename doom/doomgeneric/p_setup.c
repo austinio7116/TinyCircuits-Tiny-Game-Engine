@@ -509,17 +509,28 @@ void P_LoadBlockMap (int lump)
 
     lumplen = W_LumpLength(lump);
     count = lumplen / 2;
-	
+
+#if defined(DOOM_THUMBY) && defined(__arm__)
+    /* On device the WAD is XIP-mapped and the host is little-endian, so
+     * SHORT() is a no-op and we never write to blockmaplump after this
+     * point.  Skip the Z_Malloc copy entirely and point directly at flash —
+     * the BLOCKMAP lump is one of the largest PU_LEVEL allocations and
+     * eliminating it removes the contiguity bottleneck on level transition. */
+    blockmaplump = (short *)W_CacheLumpNum(lump, PU_LEVEL);
+    blockmap = blockmaplump + 4;
+    (void)i; (void)count;
+#else
     blockmaplump = Z_Malloc(lumplen, PU_LEVEL, NULL);
     W_ReadLump(lump, blockmaplump);
     blockmap = blockmaplump + 4;
 
     // Swap all short integers to native byte ordering.
-  
+
     for (i=0; i<count; i++)
     {
 	blockmaplump[i] = SHORT(blockmaplump[i]);
     }
+#endif
 		
     // Read the header
 
@@ -691,7 +702,7 @@ static void PadRejectArray(byte *array, unsigned int len)
 
     if (len > sizeof(rejectpad))
     {
-        fprintf(stderr, "PadRejectArray: REJECT lump too short to pad! (%i > %i)\n",
+        fprintf(stderr, "PadRejectArray: REJECT lump too short to pad! (%d > %d)\n",
                         len, (int) sizeof(rejectpad));
 
         // Pad remaining space with 0 (or 0xff, if specified on command line).
@@ -775,9 +786,9 @@ P_SetupLevel
     if ( gamemode == commercial)
     {
 	if (map<10)
-	    DEH_snprintf(lumpname, 9, "map0%i", map);
+	    DEH_snprintf(lumpname, 9, "map0%d", map);
 	else
-	    DEH_snprintf(lumpname, 9, "map%i", map);
+	    DEH_snprintf(lumpname, 9, "map%d", map);
     }
     else
     {
