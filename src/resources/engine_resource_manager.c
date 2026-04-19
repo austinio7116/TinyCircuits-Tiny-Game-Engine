@@ -23,15 +23,55 @@
     #include "hardware/flash.h"
     #include "hardware/sync.h"
 
-    // Assuming the flash is partitioned such that the firmware
-    // binary starts at XIP_BASE or the beginning of flash,
-    // allow the firmware 1MiB of room.
-    // PARTITION: | FIRMWARE | SCRATCH | FILESYSTEM |
-    #define FLASH_RESOURCE_SPACE_BASE 1 * 1024 * 1024
+    #ifdef THUMBYONE_SLOT_MODE
+        /* ThumbyOne slot build: the SDK's flash_range_erase /
+         * flash_range_program reset QMI ATRANS (which we need for
+         * the chained slot's self-view of flash) AND clobber the
+         * fast QPI continuous-read XIP config that boot2 set up.
+         * Without re-applying both after every flash op, the next
+         * XIP fetch either reads from the wrong physical address
+         * or drops to single-SPI speed — both manifest as "things
+         * get slower and slower as the game caches more textures".
+         *
+         * thumbyone_xip_fast_setup() lives in ThumbyOne/common/
+         * thumbyone_handoff.c (linked into every slot image by the
+         * parent CMake). */
+        #include "hardware/structs/qmi.h"
+        extern void thumbyone_xip_fast_setup(void);
+        static inline void thumbyone_save_atrans(uint32_t out[4]) {
+            out[0] = qmi_hw->atrans[0];
+            out[1] = qmi_hw->atrans[1];
+            out[2] = qmi_hw->atrans[2];
+            out[3] = qmi_hw->atrans[3];
+        }
+        static inline void thumbyone_restore_atrans(const uint32_t in[4]) {
+            qmi_hw->atrans[0] = in[0];
+            qmi_hw->atrans[1] = in[1];
+            qmi_hw->atrans[2] = in[2];
+            qmi_hw->atrans[3] = in[3];
+            thumbyone_xip_fast_setup();
+        }
+    #endif
 
-    // The room left over after the room for the firmware
-    // and the MicroPython filesystem is flash scratch
-    #define FLASH_RESOURCE_SPACE_SIZE PICO_FLASH_SIZE_BYTES - (MICROPY_HW_FLASH_STORAGE_BYTES + FLASH_RESOURCE_SPACE_BASE)
+    // Scratch region for non-in-RAM resources (TextureResource,
+    // MeshResource, etc.) stored directly in flash. Must sit OUTSIDE
+    // the firmware image and the MicroPython filesystem, because
+    // engine_resource_reset() erases sectors here on every engine
+    // init. Default layout (standalone Thumby Color MPY firmware
+    // occupying the whole flash): scratch starts at 1 MiB in, runs
+    // up to the start of the MicroPython littlefs/FAT partition.
+    //
+    // Multi-slot builds (ThumbyOne) override these via -D flags in
+    // the port CMake: the slot's firmware + FS share the flash with
+    // other slots, so the defaults here would overwrite siblings.
+    // PARTITION: | FIRMWARE | SCRATCH | FILESYSTEM |
+    #ifndef FLASH_RESOURCE_SPACE_BASE
+        #define FLASH_RESOURCE_SPACE_BASE (1 * 1024 * 1024)
+    #endif
+
+    #ifndef FLASH_RESOURCE_SPACE_SIZE
+        #define FLASH_RESOURCE_SPACE_SIZE (PICO_FLASH_SIZE_BYTES - (MICROPY_HW_FLASH_STORAGE_BYTES + FLASH_RESOURCE_SPACE_BASE))
+    #endif
 #endif
 
 
@@ -126,7 +166,13 @@ mp_obj_t engine_resource_get_space_bytearray(uint32_t space_size, bool fast_spac
             // https://github.com/raspberrypi/pico-examples/issues/34#issuecomment-1369267917
             // otherwise hangs forever
             uint32_t paused_interrupts = save_and_disable_interrupts();
+            #ifdef THUMBYONE_SLOT_MODE
+                uint32_t saved_atrans[4]; thumbyone_save_atrans(saved_atrans);
+            #endif
             flash_range_erase(erase_start, erase_size);
+            #ifdef THUMBYONE_SLOT_MODE
+                thumbyone_restore_atrans(saved_atrans);
+            #endif
             restore_interrupts(paused_interrupts);
 
             // Stored in contiguous flash location
@@ -174,7 +220,13 @@ void engine_resource_store_u8(uint8_t to_store){
             #if defined(__arm__)
                 uint32_t address_offset = ((uint32_t)current_storing_location) - XIP_BASE;
                 uint32_t paused_interrupts = save_and_disable_interrupts();
+                #ifdef THUMBYONE_SLOT_MODE
+                    uint32_t saved_atrans[4]; thumbyone_save_atrans(saved_atrans);
+                #endif
                 flash_range_program(address_offset + (page_prog_count*FLASH_PAGE_SIZE), page_prog, FLASH_PAGE_SIZE);
+                #ifdef THUMBYONE_SLOT_MODE
+                    thumbyone_restore_atrans(saved_atrans);
+                #endif
                 restore_interrupts(paused_interrupts);
             #else
                 memcpy(current_storing_location + (page_prog_count*FLASH_PAGE_SIZE), page_prog, FLASH_PAGE_SIZE);
@@ -207,7 +259,13 @@ void engine_resource_store_u16(uint16_t to_store){
             #if defined(__arm__)
                 uint32_t address_offset = ((uint32_t)current_storing_location) - XIP_BASE;
                 uint32_t paused_interrupts = save_and_disable_interrupts();
+                #ifdef THUMBYONE_SLOT_MODE
+                    uint32_t saved_atrans[4]; thumbyone_save_atrans(saved_atrans);
+                #endif
                 flash_range_program(address_offset + (page_prog_count*FLASH_PAGE_SIZE), page_prog, FLASH_PAGE_SIZE);
+                #ifdef THUMBYONE_SLOT_MODE
+                    thumbyone_restore_atrans(saved_atrans);
+                #endif
                 restore_interrupts(paused_interrupts);
             #else
                 memcpy(current_storing_location + (page_prog_count*FLASH_PAGE_SIZE), page_prog, FLASH_PAGE_SIZE);
@@ -227,7 +285,13 @@ void engine_resource_stop_storing(){
         #if defined(__arm__)
             uint32_t address_offset = ((uint32_t)current_storing_location) - XIP_BASE;
             uint32_t paused_interrupts = save_and_disable_interrupts();
+            #ifdef THUMBYONE_SLOT_MODE
+                uint32_t saved_atrans[4]; thumbyone_save_atrans(saved_atrans);
+            #endif
             flash_range_program(address_offset + (page_prog_count*FLASH_PAGE_SIZE), page_prog, FLASH_PAGE_SIZE);
+            #ifdef THUMBYONE_SLOT_MODE
+                thumbyone_restore_atrans(saved_atrans);
+            #endif
             restore_interrupts(paused_interrupts);
         #else
             memcpy(current_storing_location + (page_prog_count*FLASH_PAGE_SIZE), page_prog, FLASH_PAGE_SIZE);
