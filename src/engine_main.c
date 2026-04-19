@@ -76,6 +76,35 @@ TRACE_DECL(void engine_main_settings_write, (float volume, float brightness),
 )
 
 
+#ifdef THUMBYONE_SLOT_MODE
+/* ThumbyOne slot build: let the system-wide /.volume and
+ * /.brightness (set by the lobby or any slot's menu) override
+ * whatever /system/settings.txt holds. This is the bridge that
+ * makes "set the volume in the lobby" actually apply to the
+ * running game.
+ *
+ * Must be a file-scope helper rather than inline inside
+ * engine_main_settings_read — that function's body is wrapped in
+ * the TRACE_DECL(ret, sig, body) macro, which treats the body as
+ * ONE macro argument. Preprocessor directives + commas inside the
+ * body break the expansion. See also the failed 1.02 attempt's
+ * notes in memory (feedback_* project notes). */
+extern uint8_t thumbyone_settings_load_volume(void);
+extern uint8_t thumbyone_settings_load_brightness(void);
+static void thumbyone_apply_slot_settings(float *volume, float *brightness) {
+    uint8_t v = thumbyone_settings_load_volume();
+    uint8_t b = thumbyone_settings_load_brightness();
+    *volume     = (float)v / 20.0f;
+    *brightness = (float)b / 255.0f;
+    /* Match the engine's own clamp (brightness floor 0.05 stops
+     * the screen from going invisible). */
+    if (*brightness < 0.05f) *brightness = 0.05f;
+    if (*brightness > 1.0f)  *brightness = 1.0f;
+    if (*volume < 0.0f)      *volume = 0.0f;
+    if (*volume > 1.0f)      *volume = 1.0f;
+}
+#endif
+
 TRACE_DECL(void engine_main_settings_read, (),
     // Default values
     float volume = 1.0f;
@@ -149,6 +178,15 @@ TRACE_DECL(void engine_main_settings_read, (),
     }
 
     ENGINE_PRINTF("Volume: %0.2f, Brightness: %0.2f\n", (double)volume, (double)brightness);
+
+#ifdef THUMBYONE_SLOT_MODE
+    /* ThumbyOne slot build: /.volume + /.brightness on the shared
+     * FAT override /system/settings.txt. Set once in the lobby,
+     * applies to every launched game. */
+    thumbyone_apply_slot_settings(&volume, &brightness);
+    ENGINE_PRINTF("ThumbyOne override: vol=%0.2f bri=%0.2f\n",
+                  (double)volume, (double)brightness);
+#endif
 
     // Set the master volume and brightness in the other engine modules
     engine_audio_apply_master_volume((float)volume);
