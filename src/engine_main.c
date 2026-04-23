@@ -91,6 +91,14 @@ TRACE_DECL(void engine_main_settings_write, (float volume, float brightness),
  * notes in memory (feedback_* project notes). */
 extern uint8_t thumbyone_settings_load_volume(void);
 extern uint8_t thumbyone_settings_load_brightness(void);
+/* Track-only — prime the shared-backlight module's cached value so
+ * the front LED indicator (which reads thumbyone_backlight_get()
+ * live) sees the user's slider setting from moment one, instead of
+ * the default-255. The MPY slot does NOT drive GP7 via this module
+ * (the engine's own GC9107 driver owns the PIO PWM), so we use the
+ * no-hardware-touch track variant. Picker drags while the game is
+ * running keep this in sync via thumbyone_backlight_set. */
+extern void thumbyone_backlight_track(uint8_t value);
 static void thumbyone_apply_slot_settings(float *volume, float *brightness) {
     uint8_t v = thumbyone_settings_load_volume();
     uint8_t b = thumbyone_settings_load_brightness();
@@ -102,6 +110,7 @@ static void thumbyone_apply_slot_settings(float *volume, float *brightness) {
     if (*brightness > 1.0f)  *brightness = 1.0f;
     if (*volume < 0.0f)      *volume = 0.0f;
     if (*volume > 1.0f)      *volume = 1.0f;
+    thumbyone_backlight_track(b);
 }
 #endif
 
@@ -196,6 +205,41 @@ TRACE_DECL(void engine_main_settings_read, (),
 
 void engine_main_handle_settings(){
     ENGINE_PRINTF("Settings location: %s\n", settings_file_location.data);
+
+#ifdef THUMBYONE_SLOT_MODE
+    /* Prime the shared-backlight cache from the user's saved slider
+     * (on the shared FAT) BEFORE any of the engine's first-frame
+     * indicator-LED draws run. engine_io_rp3_set_indicator_color()
+     * reads thumbyone_backlight_get() in slot mode, and the engine's
+     * IO setup (called from engine_main_one_time_setup right after
+     * this) already fires an update_indicator_level that would
+     * otherwise see the default 255 and light the LED at full cap.
+     *
+     * Doing it here (unconditionally) instead of inside
+     * engine_main_settings_read() ensures it also runs on first boot
+     * when /system/settings.txt doesn't exist yet — that path skips
+     * the read and jumps straight to writing defaults. */
+    extern uint8_t thumbyone_settings_load_brightness(void);
+    extern void thumbyone_backlight_track(uint8_t value);
+    thumbyone_backlight_track(thumbyone_settings_load_brightness());
+
+    /* Mark the indicator as user-overridden BEFORE engine_io_rp3_setup
+     * runs its first update_indicator_level. The automatic battery →
+     * LED colour blend (green→red as battery drains) is useful for
+     * standalone TinyCircuits firmware, but under ThumbyOne it
+     * stomps on the idle-green state the MPY picker painted via
+     * thumbyone_led, and a low-battery reading pins the LED at full
+     * red the moment the game starts — user-confusing.
+     *
+     * Games that actually want the battery indicator can opt back in
+     * by calling engine_io.indicator(None) — that flips overridden
+     * back to false and resumes the auto path. Everything else
+     * (engine.indicator(color) / indicator(True/False)) still
+     * works identically because those explicit setters set
+     * overridden=true anyway. */
+    extern void engine_io_rp3_set_indicator_overridden(bool overridden);
+    engine_io_rp3_set_indicator_overridden(true);
+#endif
 
     // Create settings file if it does not exist, otherwise,
     // parse the file

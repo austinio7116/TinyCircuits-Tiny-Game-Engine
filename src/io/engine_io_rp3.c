@@ -66,27 +66,25 @@ void engine_io_rp3_set_indicator_overridden(bool overridden){
 }
 
 
-// Cap on peak LED on-time, applied on top of the screen-brightness
-// scale. The raw hardware LED at full duty is uncomfortably bright in
-// a dark room even when the screen is at max brightness; 80 % is the
-// nominal "brightest" — bumped from 63 % on 2026-04-23 because the old
-// cap felt too dim as the top-of-slider level. Keep in sync with
-// ThumbyOne's lobby_main.c open-coded copy and common/lib/thumbyone_led.c.
-#define LED_MAX_ON_FRACTION  0.80f
+// LED brightness curve: screen-brightness slider (0..1 float, from
+// thumbyone_backlight_get()/255 under slot mode or the engine's
+// display brightness otherwise) linearly interpolates the peak
+// on-time between LED_MIN_DUTY and LED_MAX_DUTY. Channel intensity
+// then scales that peak. The earlier curve (channel × brightness ×
+// MAX_FRACTION with a floor) left mid-slider values dim and low-
+// slider values invisible; linear MIN..MAX gives every slider
+// position a distinct, useful brightness.
+// Keep in sync with ThumbyOne lobby_main.c and common/lib/thumbyone_led.c.
+#define LED_MIN_DUTY   400    // brightness=0,   channel=1.0  → ~19.5 %
+#define LED_MAX_DUTY  1638    // brightness=1.0, channel=1.0  → ~80 %
 
-// Minimum on-time floor applied per-channel when the channel is
-// requested non-zero. Keeps the LED visible even at the lowest
-// brightness slider setting so an informative colour (battery,
-// charging, game indicator) doesn't silently vanish in a dark room.
-// 180 = ~9 % duty at WRAP 2048 (was 100 ≈ 5 %).
-#define LED_ON_TIME_FLOOR    180
-
-static inline uint16_t scale_channel_offtime(float channel_fraction, float max_on){
-    // channel_fraction is 0..1 for the caller's requested channel
-    // intensity (e.g. 1.0 for a pure primary). max_on is the brightness-
-    // derived ceiling, already capped at LED_MAX_ON_FRACTION.
-    uint16_t on_time = (uint16_t)(channel_fraction * max_on * 2047.0f);
-    if (channel_fraction > 0.0f && on_time < LED_ON_TIME_FLOOR) on_time = LED_ON_TIME_FLOOR;
+static inline uint16_t scale_channel_offtime(float channel_fraction, float brightness){
+    if (channel_fraction <= 0.0f) return 2047;   // fully off
+    if (brightness < 0.0f) brightness = 0.0f;
+    if (brightness > 1.0f) brightness = 1.0f;
+    float peak_on = (float)LED_MIN_DUTY
+                  + ((float)(LED_MAX_DUTY - LED_MIN_DUTY)) * brightness;
+    uint16_t on_time = (uint16_t)(channel_fraction * peak_on);
     if (on_time > 2047) on_time = 2047;
     // Common-anode: PWM level counts pin-HIGH (= LED off) time.
     return (uint16_t)(2047 - on_time);
@@ -105,12 +103,10 @@ void engine_io_rp3_set_indicator_color(uint16_t color){
 #else
     brightness = engine_display_get_brightness();
 #endif
-    if(brightness < 0.05f) brightness = 0.05f;  // floor: always at least faintly visible
-    float max_on = brightness * LED_MAX_ON_FRACTION;
 
-    pwm_set_gpio_level(GPIO_PWM_LED_R, scale_channel_offtime(engine_color_get_r_float(color), max_on));
-    pwm_set_gpio_level(GPIO_PWM_LED_G, scale_channel_offtime(engine_color_get_g_float(color), max_on));
-    pwm_set_gpio_level(GPIO_PWM_LED_B, scale_channel_offtime(engine_color_get_b_float(color), max_on));
+    pwm_set_gpio_level(GPIO_PWM_LED_R, scale_channel_offtime(engine_color_get_r_float(color), brightness));
+    pwm_set_gpio_level(GPIO_PWM_LED_G, scale_channel_offtime(engine_color_get_g_float(color), brightness));
+    pwm_set_gpio_level(GPIO_PWM_LED_B, scale_channel_offtime(engine_color_get_b_float(color), brightness));
 
     // Save the last value for when indicator might be
     // reenabled in the future
@@ -201,8 +197,25 @@ void engine_io_rp3_setup(){
         sleep_us(50);
     }
 
+#ifdef THUMBYONE_SLOT_MODE
+    /* The engine_io_rp3_pwm_setup calls above reset the LED channel
+     * CC registers to 0 (common-anode = fully on) which would leave
+     * the front LED glaring white-full-bright until the first
+     * update_indicator_level or game-side engine.indicator call. And
+     * update_indicator_level is gated off under slot mode (we set
+     * indicator_overridden=true in engine_main_handle_settings), so
+     * without an explicit repaint here the LED just sticks on full.
+     *
+     * Paint idle green through the shared thumbyone_led module so
+     * the MPY slot matches every other slot's boot appearance.
+     * thumbyone_led scales by thumbyone_backlight_get() which has
+     * already been primed from /.brightness in handle_settings. */
+    extern void thumbyone_led_set_rgb(uint8_t r, uint8_t g, uint8_t b);
+    thumbyone_led_set_rgb(0, 255, 0);
+#else
     // Update with battery level right away
     engine_io_rp3_update_indicator_level();
+#endif
 
     gpio_init(GPIO_BUTTON_DPAD_UP);
     gpio_init(GPIO_BUTTON_DPAD_LEFT);
