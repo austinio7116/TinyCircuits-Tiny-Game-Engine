@@ -13,7 +13,12 @@
 #include "hardware/adc.h"
 #include "math/engine_math.h"
 #include "draw/engine_color.h"
+#include "display/engine_display.h"
 #include "engine_io_module.h"
+
+#ifdef THUMBYONE_SLOT_MODE
+#  include "thumbyone_backlight.h"
+#endif
 
 #include <stdbool.h>
 
@@ -61,15 +66,51 @@ void engine_io_rp3_set_indicator_overridden(bool overridden){
 }
 
 
-void engine_io_rp3_set_indicator_color(uint16_t color){
-    // TODO: Might be able to use something like this: https://github.com/gpshead/pwm_lightness
-    float r_percent = 1.0f - engine_color_get_r_float(color);
-    float g_percent = 1.0f - engine_color_get_g_float(color);
-    float b_percent = 1.0f - engine_color_get_b_float(color);
+// Cap on peak LED on-time, applied on top of the screen-brightness
+// scale. The raw hardware LED at full duty is uncomfortably bright in
+// a dark room even when the screen is at max brightness; 80 % is the
+// nominal "brightest" — bumped from 63 % on 2026-04-23 because the old
+// cap felt too dim as the top-of-slider level. Keep in sync with
+// ThumbyOne's lobby_main.c open-coded copy and common/lib/thumbyone_led.c.
+#define LED_MAX_ON_FRACTION  0.80f
 
-    pwm_set_gpio_level(GPIO_PWM_LED_R, (uint16_t)(r_percent * 2047.0f));
-    pwm_set_gpio_level(GPIO_PWM_LED_G, (uint16_t)(g_percent * 2047.0f));
-    pwm_set_gpio_level(GPIO_PWM_LED_B, (uint16_t)(b_percent * 2047.0f));
+// Minimum on-time floor applied per-channel when the channel is
+// requested non-zero. Keeps the LED visible even at the lowest
+// brightness slider setting so an informative colour (battery,
+// charging, game indicator) doesn't silently vanish in a dark room.
+// 180 = ~9 % duty at WRAP 2048 (was 100 ≈ 5 %).
+#define LED_ON_TIME_FLOOR    180
+
+static inline uint16_t scale_channel_offtime(float channel_fraction, float max_on){
+    // channel_fraction is 0..1 for the caller's requested channel
+    // intensity (e.g. 1.0 for a pure primary). max_on is the brightness-
+    // derived ceiling, already capped at LED_MAX_ON_FRACTION.
+    uint16_t on_time = (uint16_t)(channel_fraction * max_on * 2047.0f);
+    if (channel_fraction > 0.0f && on_time < LED_ON_TIME_FLOOR) on_time = LED_ON_TIME_FLOOR;
+    if (on_time > 2047) on_time = 2047;
+    // Common-anode: PWM level counts pin-HIGH (= LED off) time.
+    return (uint16_t)(2047 - on_time);
+}
+
+void engine_io_rp3_set_indicator_color(uint16_t color){
+    // Scale the requested colour by the live screen-brightness slider
+    // so the front indicator tracks the same control that dims the
+    // LCD. Under ThumbyOne the slider lives in the shared backlight
+    // module (updated by picker + lobby in real time, independent of
+    // the engine's own screen_brightness float). Fall back to the
+    // engine's value in the stock TinyCircuits firmware build.
+    float brightness;
+#ifdef THUMBYONE_SLOT_MODE
+    brightness = (float)thumbyone_backlight_get() / 255.0f;
+#else
+    brightness = engine_display_get_brightness();
+#endif
+    if(brightness < 0.05f) brightness = 0.05f;  // floor: always at least faintly visible
+    float max_on = brightness * LED_MAX_ON_FRACTION;
+
+    pwm_set_gpio_level(GPIO_PWM_LED_R, scale_channel_offtime(engine_color_get_r_float(color), max_on));
+    pwm_set_gpio_level(GPIO_PWM_LED_G, scale_channel_offtime(engine_color_get_g_float(color), max_on));
+    pwm_set_gpio_level(GPIO_PWM_LED_B, scale_channel_offtime(engine_color_get_b_float(color), max_on));
 
     // Save the last value for when indicator might be
     // reenabled in the future
