@@ -266,6 +266,19 @@ MP_DEFINE_CONST_FUN_OBJ_0(buttons_reset_params_all_obj, engine_io_reset_all_butt
 
 
 /*  --- doc ---
+    NAME: update_buttons
+    ID: update_buttons
+    DESC: Refresh button state (is_pressed, is_just_pressed, long-press, autorepeat, etc.) without running the full engine.tick() pipeline. Cheap (~10us): only runs the button state machine, no scene-graph traversal, no display send, no framebuffer clear. Useful for legacy / non-engine code paths that need fresh button state at a higher rate than the engine frame rate (e.g., the thumby Code Editor library's `thumbyButton.pressed()` shim, which polls many times per game frame and would otherwise pay full engine.tick() cost on every poll). Game code that runs inside the normal engine loop does NOT need to call this — engine.tick() already does.
+    RETURN: None
+*/
+static mp_obj_t engine_io_update_buttons(){
+    buttons_update_state();
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(buttons_update_obj, engine_io_update_buttons);
+
+
+/*  --- doc ---
     NAME: indicator
     ID: indicator
     DESC: Disables, enables, or sets the front indicator LED color. This overrides the default battery indicator when called. Reenable the default battery indicator by passing `None`.
@@ -352,6 +365,7 @@ static const mp_rom_map_elem_t engine_io_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_MENU), MP_ROM_PTR(&BUTTON_MENU) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_release_all_buttons), MP_ROM_PTR(&buttons_release_all_obj) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_reset_all_buttons_params), MP_ROM_PTR(&buttons_reset_params_all_obj) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_update_buttons), MP_ROM_PTR(&buttons_update_obj) },
 };
 static MP_DEFINE_CONST_DICT (mp_module_engine_io_globals, engine_io_globals_table);
 
