@@ -119,6 +119,20 @@ mp_obj_t tone_sound_resource_class_new(const mp_obj_type_t *type, size_t n_args,
 
 
 void tone_sound_resource_set_frequency(tone_sound_resource_class_obj_t *self, float frequency){
+    // Clamp to a sane audio range. Defensive: a rogue caller (or a
+    // runaway-rise polysynth instrument) could otherwise pass Inf /
+    // NaN / wildly-out-of-band values, and the NOISE-shape sampler's
+    // inner LFSR-step while-loop would never exit (it advances by
+    // `frequency * dt` per outer ISR fire; with Inf the subtraction
+    // can't bring lfsr_phase below 1.0). Observed on long polysynth
+    // songs whose `instrument(rise=...)` pushed pitch through the
+    // accumulator over time and locked up the audio ISR.
+    if(!(frequency >= 0.0f) || frequency > 100000.0f){
+        // NaN compares false to everything; the negated test catches
+        // NaN and negatives. 100 kHz ceiling is well above any
+        // legitimate audio fundamental at the 22050 Hz mixer rate.
+        frequency = (frequency > 100000.0f) ? 100000.0f : 0.0f;
+    }
     if(self->instant_freq){
         // No fade — apply immediately. Phase continues from current
         // self->time so periodic shapes don't pop on contiguous notes;
