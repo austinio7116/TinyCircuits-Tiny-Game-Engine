@@ -13,8 +13,13 @@
 #endif
 
 // The number of total audio channels that
-// can be active at a single time
-#define CHANNEL_COUNT 4
+// can be active at a single time. Bumped from 4 to 7 for ThumbyOne
+// 1.11's polysynth shim (PSdemo / TinyFreddy) — the original Thumby's
+// polysynth library is a 7-voice synthesiser. RAM cost is one extra
+// audio_channel_class_obj_t per channel (~30-50 bytes); the mixer ISR
+// just iterates one more loop. No change for native Color games that
+// only use 4 or fewer channels.
+#define CHANNEL_COUNT 7
 
 
 // The total number of bytes dedicated to storing audio

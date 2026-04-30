@@ -20,7 +20,10 @@ float ENGINE_FAST_FUNCTION(tone_sound_resource_get_sample)(tone_sound_resource_c
     float gain = 1.0f;
 
     // When the frequency of this resource is changed,
-    // fade gain to zero, switch f, and then back to 1.0
+    // fade gain to zero, switch f, and then back to 1.0.
+    // Skipped entirely when instant_freq is set (polysynth-style
+    // arpeggios where the click of an unfaded transition is fine
+    // and the fade smear is audibly worse).
     if(self->fade_type == FADE_DOWN){
         self->fade_factor += STEP;
 
@@ -45,7 +48,43 @@ float ENGINE_FAST_FUNCTION(tone_sound_resource_get_sample)(tone_sound_resource_c
         }
     }
 
-    float sample = sinf(self->omega * self->time) * gain;
+    // Wave shape dispatch. SINE is the default and matches pre-1.11
+    // behaviour exactly. SQUARE and NOISE were added for the
+    // polysynth shim.
+    float sample;
+    if(self->shape == TONE_SHAPE_SQUARE){
+        // Chiptune square wave: high during the first half of each
+        // cycle, low during the second. Computed from sin's sign so
+        // we share phase semantics with sine — `phase = 0.0` resets
+        // both shapes consistently.
+        float s = sinf(self->omega * self->time);
+        sample = (s >= 0.0f) ? 1.0f : -1.0f;
+    }else if(self->shape == TONE_SHAPE_NOISE){
+        // 22-bit LFSR matching polysynth's pio_lfsr algorithm —
+        // feedback = lowest XOR highest bit. The LFSR advances at
+        // a rate gated by `frequency`: each output sample, we
+        // accumulate `frequency * dt` into `lfsr_phase` and only
+        // step the LFSR when that crosses 1.0. This produces noise
+        // whose perceived pitch / brightness scales with the same
+        // `frequency` knob the original PIO uses (which on PIO is
+        // the wave-gen counter Y; our `frequency` corresponds to
+        // 1 / (2 * halfcycles)).
+        self->lfsr_phase += self->frequency * ENGINE_AUDIO_SAMPLE_DT;
+        while(self->lfsr_phase >= 1.0f){
+            self->lfsr_phase -= 1.0f;
+            uint32_t bit_low  = self->lfsr & 1u;
+            uint32_t bit_high = (self->lfsr >> 21) & 1u;
+            uint32_t new_bit  = bit_low ^ bit_high;
+            self->lfsr = ((self->lfsr >> 1) | (new_bit << 21)) & 0x3FFFFFu;
+            self->lfsr_sample = (self->lfsr & 1u) ? 1.0f : -1.0f;
+        }
+        sample = self->lfsr_sample;
+    }else{
+        // SINE — original behaviour.
+        sample = sinf(self->omega * self->time);
+    }
+    sample *= gain;
+
     self->time += ENGINE_AUDIO_SAMPLE_DT;
     return sample;
 }
@@ -68,14 +107,31 @@ mp_obj_t tone_sound_resource_class_new(const mp_obj_type_t *type, size_t n_args,
     self->fade_type = FADE_NONE;
     self->fade_factor = 0.0f;
 
+    // 1.11 polysynth additions — defaults preserve pre-1.11 behaviour.
+    self->shape = TONE_SHAPE_SINE;
+    self->instant_freq = false;
+    self->lfsr = 1u;            // non-zero seed; 0 would lock the LFSR
+    self->lfsr_phase = 0.0f;
+    self->lfsr_sample = 1.0f;
+
     return MP_OBJ_FROM_PTR(self);
 }
 
 
 void tone_sound_resource_set_frequency(tone_sound_resource_class_obj_t *self, float frequency){
-    self->next_frequency = frequency;
-    self->fade_type = FADE_DOWN;
-    self->fade_factor = 0.0f;
+    if(self->instant_freq){
+        // No fade — apply immediately. Phase continues from current
+        // self->time so periodic shapes don't pop on contiguous notes;
+        // call .phase = 0.0 explicitly to phase-lock instead.
+        self->frequency = frequency;
+        self->omega = 2.0f * PI * frequency;
+        self->fade_type = FADE_NONE;
+        self->fade_factor = 0.0f;
+    }else{
+        self->next_frequency = frequency;
+        self->fade_type = FADE_DOWN;
+        self->fade_factor = 0.0f;
+    }
 }
 
 
@@ -102,8 +158,11 @@ MP_DEFINE_CONST_FUN_OBJ_1(tone_sound_resource_class_del_obj, tone_sound_resource
     NAME: ToneSoundResource
     ID: ToneSoundResource
     DESC: Can be used to play a tone on an audio channel
-    ATTR:   [type=float]    [name=frequency]    [value=any]                                                                                                                                                                  
-*/ 
+    ATTR:   [type=float]    [name=frequency]      [value=any]
+    ATTR:   [type=int]      [name=shape]          [value=0=SINE (default), 1=SQUARE, 2=NOISE (22-bit LFSR)]
+    ATTR:   [type=float]    [name=phase]          [value=0.0..1.0 — current cycle phase, write 0.0 to phase-lock]
+    ATTR:   [type=bool]     [name=instant_freq]   [value=False (default — fade on freq change), True — instant]
+*/
 static void tone_sound_resource_class_attr(mp_obj_t self_in, qstr attribute, mp_obj_t *destination){
     ENGINE_INFO_PRINTF("Accessing ToneSoundResource attr");
 
@@ -118,6 +177,30 @@ static void tone_sound_resource_class_attr(mp_obj_t self_in, qstr attribute, mp_
             case MP_QSTR_frequency:
                 destination[0] = mp_obj_new_float(self->frequency);
             break;
+            case MP_QSTR_shape:
+                destination[0] = mp_obj_new_int(self->shape);
+            break;
+            case MP_QSTR_phase:
+            {
+                // Report normalised phase ∈ [0, 1). For SQUARE/SINE
+                // it's `frequency * time` mod 1; NOISE uses lfsr_phase
+                // which is already in [0, 1).
+                float p;
+                if(self->shape == TONE_SHAPE_NOISE){
+                    p = self->lfsr_phase;
+                }else if(self->frequency != 0.0f){
+                    p = self->frequency * self->time;
+                    p -= (float)((int)p);
+                    if(p < 0.0f) p += 1.0f;
+                }else{
+                    p = 0.0f;
+                }
+                destination[0] = mp_obj_new_float(p);
+            }
+            break;
+            case MP_QSTR_instant_freq:
+                destination[0] = self->instant_freq ? mp_const_true : mp_const_false;
+            break;
             default:
                 return; // Fail
         }
@@ -127,6 +210,40 @@ static void tone_sound_resource_class_attr(mp_obj_t self_in, qstr attribute, mp_
             {
                 tone_sound_resource_set_frequency(self, mp_obj_get_float(destination[1]));
             }
+            break;
+            case MP_QSTR_shape:
+            {
+                int s = mp_obj_get_int(destination[1]);
+                if(s < 0) s = 0;
+                if(s > TONE_SHAPE_NOISE) s = TONE_SHAPE_NOISE;
+                self->shape = (uint8_t)s;
+            }
+            break;
+            case MP_QSTR_phase:
+            {
+                // Setting phase directly: reset the time accumulator so
+                // the next sample is taken at the requested cycle offset.
+                // For NOISE shape, also reset lfsr_phase so the next
+                // LFSR step lines up with the requested phase. Useful
+                // for chord-aligning multiple voices in the same tick.
+                float p = mp_obj_get_float(destination[1]);
+                p -= (float)((int)p);  // normalise into [0, 1)
+                if(p < 0.0f) p += 1.0f;
+                if(self->frequency != 0.0f){
+                    self->time = p / self->frequency;
+                }else{
+                    self->time = 0.0f;
+                }
+                self->lfsr_phase = p;
+                // Reset LFSR seed so phase-locked noise voices are
+                // also bit-identical at the locking moment. Without
+                // this, two NOISE voices started "in phase" would
+                // diverge based on their independent LFSR histories.
+                self->lfsr = 1u;
+            }
+            break;
+            case MP_QSTR_instant_freq:
+                self->instant_freq = mp_obj_is_true(destination[1]);
             break;
             default:
                 return; // Fail
