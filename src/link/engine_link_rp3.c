@@ -1,5 +1,20 @@
 #include "engine_link_rp3.h"
 
+/* The USB-CDC link multiplayer module is only meaningful when the
+ * firmware has a USB device + host stack linked in. The ThumbyOne
+ * MPY slot builds with MICROPY_HW_ENABLE_USBDEV=0 (lobby owns USB),
+ * so tinyUSB is not compiled — every tud_/tuh_ reference below
+ * becomes an unresolved symbol. Compile the whole file into empty
+ * stubs in that case; the Python-facing API (engine_link.send /
+ * .read / etc.) still exists via engine_link_module.c but does
+ * nothing useful, which matches the intent of "no cable link on
+ * ThumbyOne because the USB port is for host transfers". */
+#include "py/mpconfig.h"
+#ifndef MICROPY_HW_ENABLE_USBDEV
+#define MICROPY_HW_ENABLE_USBDEV 1
+#endif
+#if MICROPY_HW_ENABLE_USBDEV
+
 #include "tusb.h"
 #include "host/usbh_pvt.h"
 #include "host/usbh_pvt.h"
@@ -240,3 +255,28 @@ bool engine_link_is_started(){
 bool engine_link_is_host(){
     return is_host;
 }
+
+#else  /* !MICROPY_HW_ENABLE_USBDEV — ThumbyOne MPY slot build */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+/* No-op stubs so engine_link_module.c can still link. Every function
+ * returns a neutral "no connection" result; Python code that calls
+ * into engine_link on a ThumbyOne slot build simply sees the device
+ * as permanently disconnected. */
+bool engine_link_connected() { return false; }
+void engine_link_task() {}
+void engine_link_start() {}
+void engine_link_stop() {}
+void engine_link_on_just_connected() {}
+void engine_link_on_just_disconnected() {}
+uint32_t engine_link_send(const uint8_t *b, uint32_t c, uint32_t o) { (void)b; (void)c; (void)o; return 0; }
+void engine_link_read_into(uint8_t *b, uint32_t c, uint32_t o) { (void)b; (void)c; (void)o; }
+uint32_t engine_link_available() { return 0; }
+void engine_link_clear_send() {}
+void engine_link_clear_read() {}
+bool engine_link_is_started() { return false; }
+bool engine_link_is_host() { return false; }
+
+#endif  /* MICROPY_HW_ENABLE_USBDEV */
