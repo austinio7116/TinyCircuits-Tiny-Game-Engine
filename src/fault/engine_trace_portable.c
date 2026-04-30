@@ -6,7 +6,7 @@
 
 #undef return
 
-#include "lib/oofatfs/ff.h"
+#include "lib/fatfs/ff.h"
 
 #include "extmod/vfs.h"
 #include "py/objstr.h"
