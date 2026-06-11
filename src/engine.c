@@ -229,6 +229,20 @@ TRACE_DECL(static mp_obj_t engine_end, (),
 MP_DEFINE_CONST_FUN_OBJ_0(engine_end_obj, engine_end);
 
 
+/* --- doc ---
+   NAME: clear_scene
+   ID: engine_clear_scene
+   DESC: Immediately destroys every node in every layer (calling each node's finalizer). Use to tear down a finished or crashed game's scene before drawing something else, so its nodes stop ticking and drawing.
+   RETURN: None
+*/
+TRACE_DECL(static mp_obj_t engine_clear_scene, (),
+    engine_objects_clear_all();
+
+    return mp_const_none;
+)
+MP_DEFINE_CONST_FUN_OBJ_0(engine_clear_scene_obj, engine_clear_scene);
+
+
 
 /* --- doc ---
    NAME: time_to_next_tick
@@ -520,6 +534,7 @@ static const mp_rom_map_elem_t engine_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_dt), (mp_obj_t)&engine_mp_dt_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_start), (mp_obj_t)&engine_start_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_end), (mp_obj_t)&engine_end_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_clear_scene), (mp_obj_t)&engine_clear_scene_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_reset), (mp_obj_t)&engine_reset_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_freq), (mp_obj_t)&engine_freq_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_setting_volume), (mp_obj_t)&engine_setting_volume_obj },

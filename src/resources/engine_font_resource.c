@@ -145,6 +145,15 @@ void font_resource_get_box_dimensions(font_resource_class_obj_t *font, mp_obj_t 
     for(uint16_t icx=0; icx<str_len; icx++){
         char current_char = ((char *)str)[icx];
 
+        // Match engine_draw_text(): any non-newline, non-printable byte is
+        // drawn as '?', so it must MEASURE as '?' here too. Otherwise a
+        // non-ASCII byte (e.g. a UTF-8 em-dash) indexes out of bounds in the
+        // glyph-width table, returns a garbage width, and mis-sizes the box —
+        // which throws centered multi-line text off-screen.
+        if(current_char != 10 && (current_char < 32 || current_char > 126)){
+            current_char = 63;
+        }
+
         // Check if newline, otherwise any other character contributes to text box width
         if(current_char == 10){
             *text_box_height += font->glyph_height + line_spacing;
